@@ -1,6 +1,6 @@
 # Cloudflare Tunnel 公网访问
 
-系统正式域名为 `https://www.21050411.xyz`。当前不启用
+系统正式域名（非永久有效可访问，受制于项目组的经费和精力）为 `https://www.21050411.xyz`。当前不启用
 Cloudflare Access，访问者仍需使用系统自身账号登录。
 
 ## Cloudflare 控制台配置
