@@ -1,0 +1,10 @@
+numpy>=2.2,<3
+pandas>=2.2,<4
+scikit-learn>=1.6,<2
+matplotlib>=3.10,<4
+joblib>=1.4,<2
+psutil>=6,<8
+httpx>=0.28,<1
+
+# Embeddings are obtained through the provider-neutral remote API. Local
+# BGE/torch/transformers weights are intentionally excluded from this stage.

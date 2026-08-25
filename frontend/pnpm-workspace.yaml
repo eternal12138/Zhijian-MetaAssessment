@@ -1,0 +1,9 @@
+allowBuilds:
+  esbuild: true
+packages:
+  - '.'
+
+onlyBuiltDependencies:
+  - esbuild
+
+nodeLinker: hoisted

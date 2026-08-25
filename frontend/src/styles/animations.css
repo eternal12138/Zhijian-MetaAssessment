@@ -1,0 +1,93 @@
+/* ---- Skeleton loading animations ---- */
+.dashboard-loading { display: grid; gap: 22px; }
+.skeleton-block { position: relative; overflow: hidden; border-radius: var(--radius-xl); background: var(--color-surface-subtle); }
+.skeleton-block::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background: linear-gradient(90deg, transparent, var(--color-border), transparent);
+  animation: dashboard-skeleton 1.35s ease-in-out infinite;
+}
+.skeleton-welcome { min-height: 205px; }
+.skeleton-stat { min-height: 116px; border-radius: var(--radius-lg); }
+.skeleton-panel { min-height: 330px; }
+@keyframes dashboard-skeleton { to { transform: translateX(100%); } }
+
+/* ---- Toast Transitions ---- */
+.app-toast-enter-active, .app-toast-leave-active {
+  transition: opacity var(--motion-panel) var(--ease-out), transform var(--motion-panel) var(--ease-out);
+}
+.app-toast-enter-from, .app-toast-leave-to { opacity: 0; transform: translateY(-8px); }
+.app-toast-move { transition: transform var(--motion-panel) var(--ease-in-out); }
+
+/* ---- Modal & Dialog Transitions ---- */
+.app-modal-enter-active,
+.app-modal-leave-active {
+  transition: opacity var(--motion-panel) var(--ease-out);
+}
+.app-modal-enter-active .modal-card,
+.app-modal-leave-active .modal-card,
+.app-modal-enter-active .app-dialog,
+.app-modal-leave-active .app-dialog {
+  transition: opacity var(--motion-panel) var(--ease-out), transform var(--motion-panel) var(--ease-out);
+}
+.app-modal-enter-from,
+.app-modal-leave-to { opacity: 0; }
+.app-modal-enter-from .modal-card,
+.app-modal-leave-to .modal-card,
+.app-modal-enter-from .app-dialog,
+.app-modal-leave-to .app-dialog {
+  opacity: 0;
+  transform: translateY(8px) scale(.98);
+}
+
+/* ---- Page Transition (RouterView) ---- */
+.page-fade-enter-active,
+.page-fade-leave-active {
+  transition: opacity 150ms ease, transform 150ms var(--ease-out);
+}
+.page-fade-leave-active {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  pointer-events: none;
+}
+.page-fade-enter-from {
+  opacity: 0;
+  transform: translateY(4px);
+}
+.page-fade-leave-to {
+  opacity: 0;
+  transform: translateY(-4px);
+}
+
+/* ---- Reduced Motion Preferences ---- */
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  .skeleton-block::after { animation: none; }
+  .btn, .form-control, .form-select, .list-group-item-action, .nav-link {
+    transition-duration: 120ms !important;
+  }
+  .btn:active:not(:disabled),
+  .sidebar .nav-link:hover,
+  .sidebar .nav-link:hover i { transform: none; }
+  .app-toast-enter-active, .app-toast-leave-active,
+  .app-modal-enter-active, .app-modal-leave-active,
+  .sidebar-backdrop-enter-active, .sidebar-backdrop-leave-active,
+  .page-fade-enter-active, .page-fade-leave-active {
+    transition: opacity 150ms ease !important;
+  }
+  .app-toast-enter-from, .app-toast-leave-to,
+  .app-modal-enter-from .modal-card, .app-modal-leave-to .modal-card,
+  .app-modal-enter-from .app-dialog, .app-modal-leave-to .app-dialog,
+  .page-fade-enter-from, .page-fade-leave-to {
+    transform: none;
+  }
+  .app-modal-enter-active .modal-card, .app-modal-leave-active .modal-card,
+  .app-modal-enter-active .app-dialog, .app-modal-leave-active .app-dialog {
+    transition: opacity 150ms ease !important;
+  }
+  .app-toast-move { transition: none; }
+  .sidebar { transition: transform 1ms linear !important; }
+}

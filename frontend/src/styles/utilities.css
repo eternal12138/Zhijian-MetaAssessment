@@ -1,0 +1,75 @@
+/* ---- Page Header Utility (AppPageHeader) ---- */
+.ds-page-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-5);
+  margin-bottom: var(--space-5);
+}
+.ds-page-heading { min-width: 0; }
+.ds-eyebrow {
+  margin: 0 0 .3rem;
+  color: var(--color-primary);
+  font-size: .72rem;
+  font-weight: 750;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+.ds-title-row { display: flex; align-items: center; gap: .65rem; }
+.ds-title-row h2 { margin: 0; font-size: clamp(1.35rem, 2vw, 1.7rem); font-weight: 750; }
+.ds-title-icon {
+  display: grid;
+  place-items: center;
+  width: 38px;
+  height: 38px;
+  flex: 0 0 auto;
+  border-radius: var(--radius-md);
+  color: var(--color-primary);
+  background: var(--color-primary-soft);
+  font-size: 1.05rem;
+}
+.ds-page-description { max-width: 760px; margin: .42rem 0 0; color: var(--color-text-muted); font-size: .88rem; }
+.ds-page-actions { display: flex; align-items: center; justify-content: flex-end; gap: .65rem; flex-wrap: wrap; }
+.ds-page-header.is-compact { margin-bottom: var(--space-4); }
+.ds-page-header.is-compact .ds-title-row h2 { font-size: 1.3rem; }
+
+/* ---- Metric Pill Utility (AppMetricPill) ---- */
+.ds-metric-pill {
+  display: inline-flex;
+  align-items: baseline;
+  gap: .35rem;
+  padding: .48rem .68rem;
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  color: var(--color-text-secondary);
+  background: var(--color-surface);
+  font-size: .75rem;
+  white-space: nowrap;
+}
+.ds-metric-pill strong { color: var(--color-text); font-size: .95rem; }
+.ds-metric-pill.tone-primary { color: var(--color-primary); border-color: var(--color-border); background: var(--color-primary-soft); }
+.ds-metric-pill.tone-success { color: var(--color-success); border-color: var(--color-border); background: var(--color-success-soft); }
+.ds-metric-pill.tone-warning { color: var(--color-warning); border-color: var(--color-border); background: var(--color-warning-soft); }
+.ds-metric-pill.tone-danger { color: var(--color-danger); border-color: var(--color-border); background: var(--color-danger-soft); }
+.ds-metric-pill.tone-primary strong,
+.ds-metric-pill.tone-success strong,
+.ds-metric-pill.tone-warning strong,
+.ds-metric-pill.tone-danger strong { color: currentColor; }
+
+/* ---- Empty State Utility (AppEmptyState) ---- */
+.ds-empty-state { display: grid; justify-items: center; padding: 3rem 1.25rem; text-align: center; }
+.ds-empty-icon { display: grid; place-items: center; width: 52px; height: 52px; border-radius: var(--radius-lg); color: var(--color-text-muted); background: var(--color-surface-subtle); font-size: 1.45rem; }
+.ds-empty-state.tone-success .ds-empty-icon { color: var(--color-success); background: var(--color-success-soft); }
+.ds-empty-state.tone-warning .ds-empty-icon { color: var(--color-warning); background: var(--color-warning-soft); }
+.ds-empty-state h3 { margin: .9rem 0 .3rem; font-size: 1rem; }
+.ds-empty-state p { max-width: 520px; margin: 0; color: var(--color-text-muted); font-size: .84rem; }
+.ds-empty-actions { margin-top: 1rem; }
+
+/* ---- Placeholder Page ---- */
+.placeholder-page { min-height: 420px; display: flex; flex-direction: column; justify-content: center; align-items: center; text-align: center; }
+.placeholder-page h2 { margin: 10px 0; font-size: 26px; }
+.placeholder-page > p { max-width: 430px; color: var(--muted); }
+.placeholder-icon { width: 68px; height: 68px; display: grid; place-items: center; border-radius: 18px; color: var(--primary); background: #efeffb; font-size: 28px; }
+.construction-line { width: min(310px, 80%); height: 7px; overflow: hidden; margin: 24px 0 12px; border-radius: 10px; background: #eeeeF6; }
+.construction-line span { display: block; width: 45%; height: 100%; border-radius: inherit; background: linear-gradient(90deg, #4b49ac, #938ff1); }
+.placeholder-page small { color: #aaa9bd; }

@@ -1,0 +1,5 @@
+# Lightweight classifier runtime only. The backend requirements already pin
+# equivalent packages; this file documents the deployable model boundary.
+numpy>=2.2,<3
+scikit-learn>=1.6,<2
+joblib>=1.4,<2

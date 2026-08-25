@@ -1,0 +1,71 @@
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+!.env.*.example
+!frontend/.env.development
+!frontend/.env.production
+backend/.env
+.env.production
+cloudflare-tunnel.token
+backend/.venv/
+backend/.venv-broken-*/
+
+# Runtime data
+.dev/
+backend/.uvicorn.pid
+backend/*.log
+backend/uploads/
+backend/exports/
+data/
+backups/
+backend/models/training/
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Versioned research runtime artifacts (may contain participant text/vectors)
+research/.env.qwen
+research/.matplotlib/
+research/datasets/
+research/embeddings/*/*.npz
+research/embeddings/*/*.sqlite3*
+research/embeddings/*/*.csv
+research/embeddings/*/*.json
+research/embeddings/qwen_embedding_cache.sqlite3*
+research/results/qwen_fc_*/*
+research/results/tfidf_logistic_v1/
+research/jobs/*/
+research/baseline_output/cache/*
+research/baseline_output/models/*
+research/baseline_output/reports/
+!research/embeddings/*/.gitkeep
+!research/results/qwen_fc_*/.gitkeep
+!research/jobs/.gitkeep
+!research/baseline_output/cache/.gitkeep
+!research/baseline_output/models/.gitkeep
+
+# Frontend
+frontend/node_modules/
+frontend/node_modules.*/
+frontend/dist/
+frontend/test-results/
+frontend/playwright-report/
+/v11/
+
+# Local reports, coverage and temporary artifacts
+.coverage
+coverage.xml
+htmlcov/
+*.log
+*.pid
+*.tmp
+*.part
+
+# Editors and operating systems
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

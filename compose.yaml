@@ -1,0 +1,256 @@
+name: ${COMPOSE_PROJECT_NAME:-metacognition}
+
+services:
+  db:
+    image: mysql:8.4
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: ${DB_NAME}
+      MYSQL_USER: ${DB_USER}
+      MYSQL_PASSWORD: ${DB_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      # Root is reachable only on the private Compose network (no DB port is
+      # published) so migration and permission jobs can run across containers.
+      MYSQL_ROOT_HOST: "%"
+      TZ: Asia/Shanghai
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --default-time-zone=+08:00
+    volumes:
+      - ${DATA_DIR}/mysql:/var/lib/mysql
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - mysqladmin ping -h 127.0.0.1 -u root -p"$${MYSQL_ROOT_PASSWORD}" --silent
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    networks:
+      - internal
+    logging: &logging
+      driver: json-file
+      options:
+        max-size: 20m
+        max-file: "5"
+
+  migrate:
+    build:
+      context: ./backend
+    env_file:
+      - .env.production
+    environment:
+      # One-shot migration needs DDL privileges on every upgrade. The runtime
+      # backend below continues to use the least-privileged application user.
+      APP_DEBUG: "true"
+      DB_HOST: db
+      DB_PORT: 3306
+      DB_USER: root
+      DB_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      AUDIO_UPLOAD_DIR: /data/audio
+      RESEARCH_EXPORT_DIR: /data/exports
+      MODEL_TRAINING_DIR: /data/models
+    command: ["python", "scripts/setup_production.py"]
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - internal
+    restart: "no"
+    logging: *logging
+
+  db-permissions:
+    image: mysql:8.4
+    environment:
+      MYSQL_PWD: ${MYSQL_ROOT_PASSWORD}
+      APP_DB_USER: ${DB_USER}
+      APP_DB_NAME: ${DB_NAME}
+    command:
+      - sh
+      - -ec
+      - |
+        mysql -h db -u root -e "
+          REVOKE ALL PRIVILEGES, GRANT OPTION FROM \`$${APP_DB_USER}\`@'%';
+          GRANT SELECT, INSERT, UPDATE, DELETE
+            ON \`$${APP_DB_NAME}\`.* TO \`$${APP_DB_USER}\`@'%';
+          FLUSH PRIVILEGES;
+        "
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    networks:
+      - internal
+    restart: "no"
+    logging: *logging
+
+  backend:
+    build:
+      context: ./backend
+    restart: unless-stopped
+    env_file:
+      - .env.production
+    environment:
+      DB_HOST: db
+      DB_PORT: 3306
+      AUDIO_UPLOAD_DIR: /data/audio
+      RESEARCH_EXPORT_DIR: /data/exports
+      MODEL_TRAINING_DIR: /data/models
+    command:
+      - python
+      - -m
+      - uvicorn
+      - app.main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --workers
+      # A classifier is loaded once per process. On the 2C4G host, one worker
+      # avoids duplicate model memory and async I/O still handles cloud APIs.
+      - "1"
+      - --proxy-headers
+      - --forwarded-allow-ips=*
+    volumes:
+      - ${DATA_DIR}/audio:/data/audio
+      - ${DATA_DIR}/exports:/data/exports
+      - ${DATA_DIR}/models:/data/models
+    depends_on:
+      db-permissions:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health/ready', timeout=3)"
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks:
+      - internal
+    logging: *logging
+
+  asr-worker:
+    build:
+      context: ./backend
+    restart: unless-stopped
+    env_file:
+      - .env.production
+    environment:
+      DB_HOST: db
+      DB_PORT: 3306
+      AUDIO_UPLOAD_DIR: /data/audio
+      RESEARCH_EXPORT_DIR: /data/exports
+      MODEL_TRAINING_DIR: /data/models
+    command: ["python", "scripts/asr_worker.py"]
+    volumes:
+      - ${DATA_DIR}/audio:/data/audio
+      - ${DATA_DIR}/exports:/data/exports
+    depends_on:
+      db-permissions:
+        condition: service_completed_successfully
+    networks:
+      - internal
+    logging: *logging
+
+  extraction-worker:
+    build:
+      context: ./backend
+    restart: unless-stopped
+    env_file:
+      - .env.production
+    environment:
+      DB_HOST: db
+      DB_PORT: 3306
+      AUDIO_UPLOAD_DIR: /data/audio
+      RESEARCH_EXPORT_DIR: /data/exports
+      MODEL_TRAINING_DIR: /data/models
+    command: ["python", "scripts/extraction_worker.py"]
+    volumes:
+      - ${DATA_DIR}/audio:/data/audio
+      - ${DATA_DIR}/exports:/data/exports
+    depends_on:
+      db-permissions:
+        condition: service_completed_successfully
+    networks:
+      - internal
+    logging: *logging
+
+  model-training-worker:
+    build:
+      context: ./backend
+    restart: unless-stopped
+    cpu_shares: 512
+    mem_limit: 2g
+    pids_limit: 256
+    env_file:
+      - .env.production
+    environment:
+      DB_HOST: db
+      DB_PORT: 3306
+      AUDIO_UPLOAD_DIR: /data/audio
+      RESEARCH_EXPORT_DIR: /data/exports
+      MODEL_TRAINING_DIR: /data/models
+    command: ["python", "scripts/model_training_worker.py"]
+    volumes:
+      - ${DATA_DIR}/models:/data/models
+    depends_on:
+      db-permissions:
+        condition: service_completed_successfully
+    networks:
+      - internal
+    logging: *logging
+
+  export-worker:
+    build:
+      context: ./backend
+    restart: unless-stopped
+    env_file:
+      - .env.production
+    environment:
+      DB_HOST: db
+      DB_PORT: 3306
+      AUDIO_UPLOAD_DIR: /data/audio
+      RESEARCH_EXPORT_DIR: /data/exports
+      MODEL_TRAINING_DIR: /data/models
+    command: ["python", "scripts/export_worker.py"]
+    volumes:
+      - ${DATA_DIR}/audio:/data/audio
+      - ${DATA_DIR}/exports:/data/exports
+    depends_on:
+      db-permissions:
+        condition: service_completed_successfully
+    networks:
+      - internal
+    logging: *logging
+
+  frontend:
+    build:
+      context: ./frontend
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - 127.0.0.1:8080:80
+    networks:
+      - internal
+    logging: *logging
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    profiles: ["tunnel"]
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN}
+    depends_on:
+      frontend:
+        condition: service_started
+    networks:
+      - internal
+    logging: *logging
+
+networks:
+  internal:
+    driver: bridge
