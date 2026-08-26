@@ -23,7 +23,7 @@ AGPL-3.0 第 13 条对网络交互程序提出了额外要求：如果您修改�
 
 商业许可的授权范围、期限、费用、支持、责任限制和适用场景以双方最终签署的书面协议为准。发送咨询或讨论商业条款本身不构成授权。
 
-商业许可联系：**Li Rui** — [lir@nenu.edu.cn](mailto:lir@nenu.edu.cn)
+商业许可联系：**Li Rui及其团队** — [lir@nenu.edu.cn](mailto:lir@nenu.edu.cn)
 
 ### 3. 默认规则与第三方组件
 
@@ -53,7 +53,7 @@ If you want to do any of the following without complying with the corresponding 
 
 The scope, term, fees, support, limitations of liability, and permitted use of a commercial license are defined only by a separate written agreement signed by both parties. An inquiry or commercial discussion does not itself grant any license.
 
-Commercial licensing contact: **Li Rui** — [lir@nenu.edu.cn](mailto:lir@nenu.edu.cn)
+Commercial licensing contact: **Li Rui and his team** — [lir@nenu.edu.cn](mailto:lir@nenu.edu.cn)
 
 ### 3. Default terms and third-party materials
 
