@@ -346,8 +346,19 @@ class DeploymentConfigTests(unittest.TestCase):
         self.assertIn(migration_name, migrate_all)
         self.assertIn(migration_name, dev_script)
         self.assertIn("current_fold", migration)
+        self.assertIn("total_folds", migration)
         self.assertIn("heartbeat_at", migration)
         self.assertIn("estimated_remaining_seconds", migration)
+
+    def test_model_storage_is_persistent_and_writable_before_migrations(self):
+        compose = (PROJECT_ROOT / "compose.yaml").read_text(encoding="utf-8")
+        deploy = (PROJECT_ROOT / "deploy" / "deploy.sh").read_text(encoding="utf-8")
+        dockerignore = (PROJECT_ROOT / "backend" / ".dockerignore").read_text(encoding="utf-8")
+        self.assertIn("storage-permissions:", compose)
+        self.assertIn("${DATA_DIR}/models:/data/models", compose)
+        self.assertIn("/data/models/datasets", compose)
+        self.assertIn('${DATA_DIR}/models/datasets', deploy)
+        self.assertIn("models", dockerignore.splitlines())
 
 
 if __name__ == "__main__":

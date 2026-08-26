@@ -42,7 +42,8 @@ def main() -> None:
         with connection.cursor() as cursor:
             columns = (
                 ("current_fold", "INT NULL AFTER progress"),
-                ("heartbeat_at", "DATETIME NULL AFTER current_fold"),
+                ("total_folds", "INT NOT NULL DEFAULT 5 AFTER current_fold"),
+                ("heartbeat_at", "DATETIME NULL AFTER total_folds"),
                 ("estimated_remaining_seconds", "INT NULL AFTER heartbeat_at"),
             )
             for name, definition in columns:

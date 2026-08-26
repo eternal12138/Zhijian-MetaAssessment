@@ -72,6 +72,8 @@ fi
 sudo install -d -m 0750 "${DATA_DIR}/mysql"
 sudo install -d -m 0750 -o 10001 -g 10001 "${DATA_DIR}/audio"
 sudo install -d -m 0750 -o 10001 -g 10001 "${DATA_DIR}/exports"
+sudo install -d -m 0750 -o 10001 -g 10001 "${DATA_DIR}/models"
+sudo install -d -m 0750 -o 10001 -g 10001 "${DATA_DIR}/models/datasets"
 sudo install -d -m 0700 "${BACKUP_DIR}"
 chmod 0600 "${ENV_FILE}"
 

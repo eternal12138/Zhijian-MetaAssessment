@@ -35,12 +35,9 @@ $includeFiles = @(
     ".env.production.example",
     ".gitignore",
     "compose.yaml",
-    "CLOUDFLARE_TUNNEL.md",
     "DEPLOY_ALIYUN.md",
     "dev.cmd",
     "dev.ps1",
-    "EXPERIMENT_DATA.md",
-    "EXPERT_DATASET.md",
     "README.md",
     "stop.ps1",
     "VOLCENGINE_ASR.md"
@@ -74,6 +71,7 @@ function Get-DeployFiles {
             $name -eq ".pytest_cache" -or
             $name -eq "uploads" -or
             $name -eq "exports" -or
+            ($RelativeDirectory -eq "backend" -and $name -eq "models") -or
             $name -eq "dist" -or
             $name -eq "test-results" -or
             $name -eq "playwright-report" -or
@@ -91,31 +89,44 @@ $packageFiles = @($includeFiles)
 $packageFiles += @(Get-DeployFiles "backend")
 $packageFiles += @(Get-DeployFiles "frontend")
 $packageFiles += @(Get-DeployFiles "deploy")
-$packageFiles = @($packageFiles | Sort-Object -Unique)
-[System.IO.File]::WriteAllLines(
-    $temporaryFileList,
-    $packageFiles,
-    [System.Text.UTF8Encoding]::new($false)
+$packageFiles = @(
+    $packageFiles |
+        Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } |
+        Sort-Object -Unique
 )
-
-$tarArguments = @(
-    "-a",
-    "-c",
-    "-f",
-    $temporaryArchive,
-    "-T",
-    $temporaryFileList
-)
-
-Push-Location $projectRoot
+Add-Type -AssemblyName System.IO.Compression.FileSystem
 try {
-    & tar.exe @tarArguments
-    if ($LASTEXITCODE -ne 0) {
-        throw "tar.exe failed with exit code $LASTEXITCODE."
+    $zip = [System.IO.Compression.ZipFile]::Open(
+        $temporaryArchive,
+        [System.IO.Compression.ZipArchiveMode]::Create
+    )
+    try {
+        foreach ($relativePath in $packageFiles) {
+            $sourcePath = Join-Path $projectRoot $relativePath
+            if (-not (Test-Path -LiteralPath $sourcePath -PathType Leaf)) {
+                throw "Deployment package source file is missing: $relativePath"
+            }
+            $entryName = $relativePath.Replace("\", "/")
+            [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile(
+                $zip,
+                $sourcePath,
+                $entryName,
+                [System.IO.Compression.CompressionLevel]::Optimal
+            ) | Out-Null
+        }
+    }
+    finally {
+        $zip.Dispose()
     }
 
-    $entries = @(& tar.exe -tf $temporaryArchive)
-    if ($LASTEXITCODE -ne 0 -or $entries.Count -eq 0) {
+    $validationZip = [System.IO.Compression.ZipFile]::OpenRead($temporaryArchive)
+    try {
+        $entries = @($validationZip.Entries | ForEach-Object FullName)
+    }
+    finally {
+        $validationZip.Dispose()
+    }
+    if ($entries.Count -eq 0) {
         throw "Deployment package validation failed: archive is empty or unreadable."
     }
 
@@ -127,10 +138,9 @@ try {
         throw "Deployment package contains local-only files: $($forbidden -join ', ')"
     }
 
-    Move-Item -LiteralPath $temporaryArchive -Destination $OutputPath
+    Copy-Item -LiteralPath $temporaryArchive -Destination $OutputPath
 }
 finally {
-    Pop-Location
     if (Test-Path -LiteralPath $temporaryArchive) {
         Remove-Item -LiteralPath $temporaryArchive -Force
     }

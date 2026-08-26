@@ -162,8 +162,8 @@ cd backend
 8. 问卷 CSV 与转录候选 ZIP 均属于受控实名导出。ZIP 可选择是否包含标准 WAV，
    并按中文目录分别保存用户信息、原转录、AI 候选和人工接受文本；双人盲编、
    共识与仲裁结果通过独立的专家训练数据 CSV 导出。只有获授权的教师和管理员
-   能够导出，创建、下载凭证和下载行为均写入审计日志。具体口径见
-   `EXPERIMENT_DATA.md` 与 `EXPERT_DATASET.md`。
+   能够导出，创建、下载凭证和下载行为均写入审计日志；具体导出字段以研究管理
+   页面和后端导出接口的当前版本为准。
 
 固定双人编码工作流使用 `backend/scripts/migrate_phase12.py` 创建数据表。
 本地 `dev.ps1` 和服务器 `backend/scripts/migrate_all.py` 都会幂等执行该迁移，

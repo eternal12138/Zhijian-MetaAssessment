@@ -63,6 +63,7 @@ htmlcov/
 *.pid
 *.tmp
 *.part
+metacognition-deploy-*.zip
 
 # Editors and operating systems
 .vscode/

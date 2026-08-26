@@ -35,6 +35,28 @@ services:
         max-size: 20m
         max-file: "5"
 
+  storage-permissions:
+    build:
+      context: ./backend
+    user: "0:0"
+    command:
+      - sh
+      - -ec
+      - |
+        for directory in /data/audio /data/exports /data/models /data/models/datasets; do
+          mkdir -p "$${directory}"
+          chown 10001:10001 "$${directory}"
+          chmod 0750 "$${directory}"
+        done
+    volumes:
+      - ${DATA_DIR}/audio:/data/audio
+      - ${DATA_DIR}/exports:/data/exports
+      - ${DATA_DIR}/models:/data/models
+    restart: "no"
+    networks:
+      - internal
+    logging: *logging
+
   migrate:
     build:
       context: ./backend
@@ -55,6 +77,8 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      storage-permissions:
+        condition: service_completed_successfully
     networks:
       - internal
     restart: "no"
