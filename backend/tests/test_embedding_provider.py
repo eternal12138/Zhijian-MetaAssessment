@@ -3,11 +3,13 @@ from __future__ import annotations
 import json
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import httpx
 import numpy as np
 
 from app.services.embedding_provider import (
+    EmbeddingCall,
     EmbeddingConfig,
     EmbeddingConfigurationError,
     EmbeddingProviderError,
@@ -15,7 +17,9 @@ from app.services.embedding_provider import (
     assert_embedding_identity,
     embedding_cache_key,
 )
-from app.services.model_inference import apply_tfidf_fallback, mark_pending_classification
+from app.services.model_inference import (
+    _embed_texts, apply_tfidf_fallback, mark_pending_classification,
+)
 
 
 def config(**updates) -> EmbeddingConfig:
@@ -40,6 +44,56 @@ def response(request: httpx.Request, count: int, dimensions: int = 3) -> httpx.R
 
 
 class EmbeddingProviderTests(unittest.IsolatedAsyncioTestCase):
+    async def test_embedding_cache_deduplicates_equal_texts_within_one_batch(self):
+        class Scalars:
+            @staticmethod
+            def all():
+                return []
+
+        class Database:
+            def __init__(self):
+                self.added = []
+
+            async def scalars(self, _statement):
+                return Scalars()
+
+            def add(self, item):
+                self.added.append(item)
+
+        calls = []
+
+        class Provider:
+            def __init__(self, _config):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+            async def embed(self, texts):
+                calls.append(texts)
+                return EmbeddingCall(
+                    vectors=np.asarray([[1, 0, 0], [0, 1, 0]], dtype=np.float32),
+                    request_latencies_ms=(1.0,), request_count=1,
+                    failed_request_count=0, batch_sizes=(2,),
+                )
+
+        database = Database()
+        runtime_config = {
+            "provider": "mock", "model": "embed-v1", "version": "2026-1",
+            "dimensions": 3, "base_url": "https://embedding.example/v1",
+            "api_key": "secret", "normalized": True, "instruction": None,
+            "batch_size": 20, "timeout": 5.0, "max_retries": 1,
+        }
+        with patch("app.services.model_inference.RemoteEmbeddingProvider", Provider):
+            result = await _embed_texts(["重复文本", "重复文本", "另一文本"], runtime_config, database)
+        self.assertEqual(calls, [["重复文本", "另一文本"]])
+        self.assertEqual(result.shape, (3, 3))
+        np.testing.assert_array_equal(result[0], result[1])
+        self.assertEqual(len(database.added), 2)
+
     async def test_mock_provider_batches_and_preserves_order(self):
         batches = []
         async def handler(request):

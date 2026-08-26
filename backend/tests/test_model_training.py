@@ -10,6 +10,7 @@ from app.config import Settings
 from app.models.research import ModelTrainingJob
 from app.schemas.model_training import TrainingJobCreate, TrainingSuiteCreate
 from app.services.model_artifacts import load_model_artifact, sha256_file
+from app.services.model_inference import _probe_embedding_features
 from app.services.model_training import (
     _TrainingProgressState, _job_config, _job_embedding_config,
     _train_embedding_classifier, _train_tfidf,
@@ -53,6 +54,16 @@ class ModelTrainingLifecycleTests(unittest.TestCase):
             TrainingSuiteCreate(version_prefix="模型/第一轮")
         with self.assertRaises(ValueError):
             TrainingSuiteCreate(version_prefix="模型 第一轮")
+
+    def test_activation_probe_accepts_numpy_embedding_matrix(self):
+        vectors = np.ones((1, 4), dtype=np.float32)
+        features = _probe_embedding_features(vectors, 4)
+        self.assertEqual(features.shape, (1, 4))
+        self.assertTrue(np.isfinite(features).all())
+
+    def test_activation_probe_rejects_wrong_embedding_shape(self):
+        with self.assertRaisesRegex(ValueError, "向量形状异常"):
+            _probe_embedding_features(np.ones((2, 4), dtype=np.float32), 4)
 
     def test_custom_comparison_requires_unique_model_selection(self):
         suite = TrainingSuiteCreate(

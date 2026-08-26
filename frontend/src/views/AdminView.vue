@@ -6,7 +6,6 @@ import { parseBatchUsers } from '../utils/batchUsers'
 import { confirmAction, notify } from '../composables/useUiFeedback'
 import AppPageHeader from '../components/ui/AppPageHeader.vue'
 import AppModal from '../components/ui/AppModal.vue'
-import MacroAnalyticsDashboard from '../components/dashboard/MacroAnalyticsDashboard.vue'
 
 const userStore = useUserStore()
 const isSuperAdmin = computed(() => userStore.profile.role === 'admin')

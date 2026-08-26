@@ -17,6 +17,7 @@ from starlette.background import BackgroundTask
 from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
+from scipy import stats
 
 from app.config import get_settings
 from app.core.security import can_access_user, get_current_user, require_role
@@ -3471,140 +3472,275 @@ async def get_macro_analytics(
     user: User = Depends(require_role("teacher", "admin")),
     db: AsyncSession = Depends(get_db),
 ):
-    """动态从数据库实时聚合计算班级宏观三维常模、任务顺序效应平衡性、行为转化漏斗与 APM 遥测数据。"""
-    # 1. 班级与全校三维常模动态聚合
-    query = select(MetacognitiveProfile, User.class_group).join(User, MetacognitiveProfile.user_id == User.id)
-    all_profiles_res = await db.execute(query)
-    all_profiles = all_profiles_res.all()
-
-    class_dim_sums = {"monitoring": 0.0, "controlDebugging": 0.0, "evaluation": 0.0}
-    class_count = 0
-    norm_dim_sums = {"monitoring": 0.0, "controlDebugging": 0.0, "evaluation": 0.0}
-    norm_count = 0
-
-    for profile, user_class in all_profiles:
-        scores = profile.scores or {}
-        m = float(scores.get("monitoring", 0.0))
-        c = float(scores.get("controlDebugging", scores.get("regulation", 0.0)))
-        e = float(scores.get("evaluation", 0.0))
-
-        if m > 0 or c > 0 or e > 0:
-            norm_dim_sums["monitoring"] += m
-            norm_dim_sums["controlDebugging"] += c
-            norm_dim_sums["evaluation"] += e
-            norm_count += 1
-
-            if class_group == "all" or user_class == class_group:
-                class_dim_sums["monitoring"] += m
-                class_dim_sums["controlDebugging"] += c
-                class_dim_sums["evaluation"] += e
-                class_count += 1
-
-    # 若暂无该班级数据，以系统常模或基准线为底线
-    if class_count > 0:
-        class_avg = [
-            {"dimension": "monitoring", "label": "监控 (Monitoring)", "score": round(class_dim_sums["monitoring"] / class_count, 1), "max": 100},
-            {"dimension": "controlDebugging", "label": "调节 (Regulation)", "score": round(class_dim_sums["controlDebugging"] / class_count, 1), "max": 100},
-            {"dimension": "evaluation", "label": "评估 (Evaluation)", "score": round(class_dim_sums["evaluation"] / class_count, 1), "max": 100},
-        ]
-    else:
-        class_avg = [
-            {"dimension": "monitoring", "label": "监控 (Monitoring)", "score": 75.0, "max": 100},
-            {"dimension": "controlDebugging", "label": "调节 (Regulation)", "score": 71.2, "max": 100},
-            {"dimension": "evaluation", "label": "评估 (Evaluation)", "score": 68.5, "max": 100},
-        ]
-
-    if norm_count > 0:
-        norm_avg = [
-            {"dimension": "monitoring", "label": "监控 (Monitoring)", "score": round(norm_dim_sums["monitoring"] / norm_count, 1), "max": 100},
-            {"dimension": "controlDebugging", "label": "调节 (Regulation)", "score": round(norm_dim_sums["controlDebugging"] / norm_count, 1), "max": 100},
-            {"dimension": "evaluation", "label": "评估 (Evaluation)", "score": round(norm_dim_sums["evaluation"] / norm_count, 1), "max": 100},
-        ]
-    else:
-        norm_avg = [
-            {"dimension": "monitoring", "label": "监控 (Monitoring)", "score": 65.0, "max": 100},
-            {"dimension": "controlDebugging", "label": "调节 (Regulation)", "score": 62.5, "max": 100},
-            {"dimension": "evaluation", "label": "评估 (Evaluation)", "score": 58.0, "max": 100},
-        ]
-
-    # 2. 任务顺序效应平衡性 (AB vs BA) 真实数据统计与 t 检验
-    runs_res = await db.execute(select(AssessmentRun))
-    all_runs = runs_res.scalars().all()
-
-    durations_ab, scores_ab = [], []
-    durations_ba, scores_ba = [], []
-
-    for run in all_runs:
-        dur_min = 18.0
-        if run.started_at and run.ended_at:
-            dur_min = max(2.0, round((run.ended_at - run.started_at).total_seconds() / 60.0, 1))
-
-        # 估算或读取该 run 的得分
-        score = 78.0
-        if run.task_order == "BA":
-            durations_ba.append(dur_min)
-            scores_ba.append(score)
-        else:
-            durations_ab.append(dur_min)
-            scores_ab.append(score)
-
-    count_ab = max(len(durations_ab), 1)
-    count_ba = max(len(durations_ba), 1)
-    avg_dur_ab = round(sum(durations_ab) / count_ab, 1) if durations_ab else 18.4
-    avg_dur_ba = round(sum(durations_ba) / count_ba, 1) if durations_ba else 19.1
-    avg_score_ab = round(sum(scores_ab) / count_ab, 1) if scores_ab else 78.6
-    avg_score_ba = round(sum(scores_ba) / count_ba, 1) if scores_ba else 77.2
-
-    # 3. 认知行为转化漏斗
-    coded_res = await db.execute(
-        select(CodedSegment.dimension, func.count(CodedSegment.id)).group_by(CodedSegment.dimension)
+    """Aggregate only observable research records; never substitute demo values."""
+    started = time.perf_counter()
+    dimensions = (
+        ("monitoring", "监控 (Monitoring)"),
+        ("controlDebugging", "调控 (Regulation)"),
+        ("evaluation", "评估 (Evaluation)"),
     )
-    coded_counts = dict(coded_res.all())
-    c_m = coded_counts.get("monitoring", 0)
-    c_c = coded_counts.get("controlDebugging", coded_counts.get("regulation", 0))
-    c_e = coded_counts.get("evaluation", 0)
-    if c_m == 0:
-        c_m, c_c, c_e = 248, 194, 162
+    def normalize_dimension(value: object) -> str | None:
+        normalized = str(value or "").strip().lower().replace("-", "_")
+        return {
+            "monitoring": "monitoring",
+            "regulation": "controlDebugging",
+            "control_regulation": "controlDebugging",
+            "controldebugging": "controlDebugging",
+            "control_debugging": "controlDebugging",
+            "evaluation": "evaluation",
+        }.get(normalized)
 
-    r_c = round((c_c / c_m) * 100, 1) if c_m > 0 else 78.2
-    r_e = round((c_e / c_m) * 100, 1) if c_m > 0 else 65.3
+    profile_rows = (await db.execute(
+        select(MetacognitiveProfile, User, AssessmentRun)
+        .join(User, User.id == MetacognitiveProfile.user_id)
+        .join(AssessmentRun, AssessmentRun.id == MetacognitiveProfile.run_id)
+        .where(AssessmentRun.status == "completed")
+    )).all()
+    visible_profiles = [
+        (profile, owner, run)
+        for profile, owner, run in profile_rows
+        if can_access_user(user, owner)
+    ]
+    selected_profiles = [
+        row for row in visible_profiles
+        if class_group == "all" or row[1].class_group == class_group
+    ]
 
-    return {
+    def profile_scores(profile: MetacognitiveProfile) -> dict[str, float] | None:
+        values: dict[str, float] = {}
+        for detail in profile.dimension_details or []:
+            dimension = normalize_dimension(detail.get("dimension"))
+            if dimension not in {item[0] for item in dimensions}:
+                continue
+            try:
+                score = float(detail.get("score"))
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(score):
+                values[dimension] = min(100.0, max(0.0, score))
+        return values if all(dimension in values for dimension, _ in dimensions) else None
+
+    selected_score_rows = [
+        scores for profile, _owner, _run in selected_profiles
+        if (scores := profile_scores(profile)) is not None
+    ]
+    reference_score_rows = [
+        scores for profile, _owner, _run in visible_profiles
+        if (scores := profile_scores(profile)) is not None
+    ]
+
+    def averages(rows: list[dict[str, float]]) -> list[dict]:
+        if not rows:
+            return []
+        return [
+            {
+                "dimension": dimension,
+                "label": label,
+                "score": round(sum(row[dimension] for row in rows) / len(rows), 1),
+                "max": 100,
+            }
+            for dimension, label in dimensions
+        ]
+
+    run_rows = (await db.execute(
+        select(AssessmentRun, User, MetacognitiveProfile)
+        .join(User, User.id == AssessmentRun.user_id)
+        .outerjoin(MetacognitiveProfile, MetacognitiveProfile.run_id == AssessmentRun.id)
+        .where(AssessmentRun.status == "completed")
+    )).all()
+    selected_runs = [
+        (run, owner, profile)
+        for run, owner, profile in run_rows
+        if can_access_user(user, owner)
+        and (class_group == "all" or owner.class_group == class_group)
+    ]
+    run_ids = [run.id for run, _owner, _profile in selected_runs]
+    session_ids = list((await db.scalars(
+        select(AssessmentSession.id).where(AssessmentSession.run_id.in_(run_ids))
+    )).all()) if run_ids else []
+    accepted_by_run = dict((await db.execute(
+        select(ExtractionCandidate.run_id, func.count(ExtractionCandidate.id))
+        .where(
+            ExtractionCandidate.run_id.in_(run_ids),
+            ExtractionCandidate.review_status == "accepted",
+        )
+        .group_by(ExtractionCandidate.run_id)
+    )).all()) if run_ids else {}
+
+    groups: dict[str, dict[str, list[float] | int]] = {
+        "AB": {"durations": [], "scores": [], "densities": [], "count": 0},
+        "BA": {"durations": [], "scores": [], "densities": [], "count": 0},
+    }
+    for run, _owner, profile in selected_runs:
+        code = run.task_order_code if run.task_order_code in groups else None
+        if code is None:
+            continue
+        group = groups[code]
+        group["count"] = int(group["count"]) + 1
+        duration = None
+        if run.started_at and run.completed_at and run.completed_at >= run.started_at:
+            duration = (run.completed_at - run.started_at).total_seconds() / 60.0
+            if duration > 0:
+                group["durations"].append(duration)
+                group["densities"].append(float(accepted_by_run.get(run.id, 0)) / duration)
+        if profile is not None:
+            group["scores"].append(float(profile.overall_score))
+
+    def mean_or_none(values: list[float], digits: int = 1) -> float | None:
+        return round(sum(values) / len(values), digits) if values else None
+
+    ab_scores = groups["AB"]["scores"]
+    ba_scores = groups["BA"]["scores"]
+    test_result = {
+        "available": False,
+        "metric": "综合画像得分",
+        "t_statistic": None,
+        "p_value": None,
+        "levene_p_value": None,
+        "interpretation": "AB、BA 两组都至少需要 2 份含画像得分的完整测评，当前仅展示描述统计。",
+    }
+    if len(ab_scores) >= 2 and len(ba_scores) >= 2:
+        t_result = stats.ttest_ind(ab_scores, ba_scores, equal_var=False, nan_policy="omit")
+        levene_result = stats.levene(ab_scores, ba_scores, center="median")
+        if math.isfinite(float(t_result.statistic)) and math.isfinite(float(t_result.pvalue)):
+            p_value = float(t_result.pvalue)
+            test_result = {
+                "available": True,
+                "metric": "综合画像得分",
+                "t_statistic": round(float(t_result.statistic), 4),
+                "p_value": round(p_value, 4),
+                "levene_p_value": (
+                    round(float(levene_result.pvalue), 4)
+                    if math.isfinite(float(levene_result.pvalue)) else None
+                ),
+                "interpretation": (
+                    "当前样本中检测到任务顺序组间差异（p < 0.05）；仍需结合样本量与效应量审慎解释。"
+                    if p_value < 0.05 else
+                    "当前样本未检测到任务顺序组间差异（p ≥ 0.05）；这不等同于证明两组完全相同。"
+                ),
+            }
+
+    expert_counts = {"monitoring": 0, "controlDebugging": 0, "evaluation": 0}
+    if session_ids:
+        expert_rows = (await db.execute(
+            select(CodingUnit.final_dimension, func.count(CodingUnit.id))
+            .where(
+                CodingUnit.session_id.in_(session_ids),
+                CodingUnit.status.in_(("agreed", "adjudicated")),
+                CodingUnit.final_dimension.is_not(None),
+            )
+            .group_by(CodingUnit.final_dimension)
+        )).all()
+        for raw_dimension, count in expert_rows:
+            mapped = normalize_dimension(raw_dimension)
+            if mapped in expert_counts:
+                expert_counts[mapped] += int(count)
+
+    model_counts = {"monitoring": 0, "controlDebugging": 0, "evaluation": 0}
+    if run_ids:
+        model_rows = (await db.execute(
+            select(ExtractionCandidate.predicted_dimension, func.count(ExtractionCandidate.id))
+            .where(
+                ExtractionCandidate.run_id.in_(run_ids),
+                ExtractionCandidate.review_status.in_(("accepted", "pending")),
+                ExtractionCandidate.classification_status.in_(("classified", "classified_with_fallback")),
+                ExtractionCandidate.predicted_dimension.is_not(None),
+            )
+            .group_by(ExtractionCandidate.predicted_dimension)
+        )).all()
+        for raw_dimension, count in model_rows:
+            mapped = normalize_dimension(raw_dimension)
+            if mapped in model_counts:
+                model_counts[mapped] += int(count)
+
+    primary_counts = expert_counts if sum(expert_counts.values()) else model_counts
+    primary_source = "expert_consensus" if sum(expert_counts.values()) else (
+        "production_model" if sum(model_counts.values()) else "none"
+    )
+
+    asr_statuses = dict((await db.execute(
+        select(AsrJob.status, func.count(AsrJob.id))
+        .where(AsrJob.session_id.in_(session_ids))
+        .group_by(AsrJob.status)
+    )).all()) if session_ids else {}
+    extraction_statuses = dict((await db.execute(
+        select(ExtractionJob.status, func.count(ExtractionJob.id))
+        .where(ExtractionJob.session_id.in_(session_ids))
+        .group_by(ExtractionJob.status)
+    )).all()) if session_ids else {}
+    terminal_asr = int(asr_statuses.get("completed", 0)) + int(asr_statuses.get("failed", 0))
+    asr_success_rate = (
+        round(int(asr_statuses.get("completed", 0)) / terminal_asr * 100, 1)
+        if terminal_asr else None
+    )
+    candidate_total = sum(model_counts.values())
+    eligible_candidate_count = int(await db.scalar(
+        select(func.count(ExtractionCandidate.id)).where(
+            ExtractionCandidate.run_id.in_(run_ids),
+            ExtractionCandidate.review_status.in_(("accepted", "pending")),
+        )
+    ) or 0) if run_ids else 0
+
+    response = {
         "class_name": class_group,
-        "sample_count": class_count or len(all_runs),
-        "class_averages": class_avg,
-        "norm_benchmarks": norm_avg,
+        "generated_at": utc_isoformat(utc_now_naive()),
+        "available_class_groups": sorted({
+            owner.class_group for _run, owner, _profile in run_rows
+            if owner.class_group and can_access_user(user, owner)
+        }),
+        "sample_count": len(selected_score_rows),
+        "reference_sample_count": len(reference_score_rows),
+        "class_averages": averages(selected_score_rows),
+        "reference_averages": averages(reference_score_rows),
+        "profile_source": "已完成测评生成的元认知画像；参照组为当前账号有权访问的全部画像，不是外部常模。",
         "order_balance": {
             "groupAB": {
                 "name": "任务 AB 组 (先A后B)",
-                "count": count_ab,
-                "avgDurationMin": avg_dur_ab,
-                "avgScore": avg_score_ab,
-                "metaDensity": "4.2 条/分钟",
+                "count": groups["AB"]["count"],
+                "scoreCount": len(groups["AB"]["scores"]),
+                "avgDurationMin": mean_or_none(groups["AB"]["durations"]),
+                "avgScore": mean_or_none(groups["AB"]["scores"]),
+                "acceptedCandidateDensity": mean_or_none(groups["AB"]["densities"], 2),
             },
             "groupBA": {
                 "name": "任务 BA 组 (先B后A)",
-                "count": count_ba,
-                "avgDurationMin": avg_dur_ba,
-                "avgScore": avg_score_ba,
-                "metaDensity": "4.0 条/分钟",
+                "count": groups["BA"]["count"],
+                "scoreCount": len(groups["BA"]["scores"]),
+                "avgDurationMin": mean_or_none(groups["BA"]["durations"]),
+                "avgScore": mean_or_none(groups["BA"]["scores"]),
+                "acceptedCandidateDensity": mean_or_none(groups["BA"]["densities"], 2),
             },
-            "tStatistic": "t = 0.428",
-            "pValue": "p = 0.671 (无显著顺序偏差，平衡性良好)",
-            "varianceHomogeneity": "Levene 检验 p = 0.812 (方差齐性成立)",
+            "test": test_result,
         },
-        "transition_funnel": {
-            "monitoring_events": c_m,
-            "regulation_events": c_c,
-            "regulation_rate": r_c,
-            "evaluation_events": c_e,
-            "evaluation_rate": r_e,
+        "dimension_distribution": {
+            "primary_source": primary_source,
+            "counts": primary_counts,
+            "total": sum(primary_counts.values()),
+            "expert_consensus_total": sum(expert_counts.values()),
+            "production_model_total": sum(model_counts.values()),
         },
-        "apm_metrics": {
-            "apiP95Latency": "42 ms",
-            "dbPoolHealth": "100% (活跃连接就绪)",
-            "asrSuccessRate": "99.85%",
-            "idempotentHits": "已开启幂等保护",
-            "autoRetrySuccess": "100% (5次退避保障)",
+        "pipeline_status": {
+            "database": "available",
+            "asr": {
+                "statuses": {str(key): int(value) for key, value in asr_statuses.items()},
+                "terminal_count": terminal_asr,
+                "success_rate": asr_success_rate,
+            },
+            "extraction": {
+                "statuses": {str(key): int(value) for key, value in extraction_statuses.items()},
+                "total": sum(int(value) for value in extraction_statuses.values()),
+            },
+            "classification": {
+                "eligible_candidates": eligible_candidate_count,
+                "classified_candidates": candidate_total,
+                "coverage_rate": (
+                    round(candidate_total / eligible_candidate_count * 100, 1)
+                    if eligible_candidate_count else None
+                ),
+            },
         },
     }
+    response["pipeline_status"]["aggregation_latency_ms"] = round(
+        (time.perf_counter() - started) * 1000, 1
+    )
+    return response

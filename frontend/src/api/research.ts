@@ -227,6 +227,52 @@ export interface ResearchDashboard {
   }>
 }
 
+export interface MacroAnalytics {
+  class_name: string
+  generated_at: string
+  available_class_groups: string[]
+  sample_count: number
+  reference_sample_count: number
+  class_averages: Array<{ dimension: 'monitoring' | 'controlDebugging' | 'evaluation'; label: string; score: number; max: number }>
+  reference_averages: Array<{ dimension: 'monitoring' | 'controlDebugging' | 'evaluation'; label: string; score: number; max: number }>
+  profile_source: string
+  order_balance: {
+    groupAB: MacroOrderGroup
+    groupBA: MacroOrderGroup
+    test: {
+      available: boolean
+      metric: string
+      t_statistic: number | null
+      p_value: number | null
+      levene_p_value: number | null
+      interpretation: string
+    }
+  }
+  dimension_distribution: {
+    primary_source: 'expert_consensus' | 'production_model' | 'none'
+    counts: Record<'monitoring' | 'controlDebugging' | 'evaluation', number>
+    total: number
+    expert_consensus_total: number
+    production_model_total: number
+  }
+  pipeline_status: {
+    database: 'available'
+    aggregation_latency_ms: number
+    asr: { statuses: Record<string, number>; terminal_count: number; success_rate: number | null }
+    extraction: { statuses: Record<string, number>; total: number }
+    classification: { eligible_candidates: number; classified_candidates: number; coverage_rate: number | null }
+  }
+}
+
+export interface MacroOrderGroup {
+  name: string
+  count: number
+  scoreCount: number
+  avgDurationMin: number | null
+  avgScore: number | null
+  acceptedCandidateDensity: number | null
+}
+
 export interface QualityCheck {
   key: string
   label: string
@@ -907,7 +953,7 @@ export const researchApi = {
     )
   },
   getMacroAnalytics(classGroup = 'all') {
-    return apiClient.get('/research/macro-analytics', {
+    return apiClient.get<MacroAnalytics>('/research/macro-analytics', {
       params: { class_group: classGroup }
     })
   }

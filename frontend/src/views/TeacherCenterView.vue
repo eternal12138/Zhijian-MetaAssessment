@@ -60,6 +60,11 @@ const qualitySaving = ref(false)
 const userStore = useUserStore()
 const qualityPageCount = computed(() => Math.max(1, Math.ceil(qualityTotal.value / qualityPageSize.value)))
 const taskOrderPageCount = computed(() => Math.max(1, Math.ceil((taskOrders.value?.total ?? 0) / taskOrderPageSize.value)))
+const macroClassGroups = computed(() => Array.from(new Set(
+  (taskOrders.value?.students ?? [])
+    .map(student => student.class_group?.trim())
+    .filter((classGroup): classGroup is string => Boolean(classGroup))
+)).sort((a, b) => a.localeCompare(b, 'zh-CN')))
 
 const pageTitle = computed(() => (
   userStore.profile.role === 'admin' ? '系统与研究概览' : '教师与研究中心'
@@ -136,7 +141,8 @@ async function loadPage() {
   errorMessage.value = ''
   sectionErrors.value = []
   const analyticsController = new AbortController()
-  const analyticsTimeout = window.setTimeout(() => analyticsController.abort(), 3000)
+  // 2C4G 云端首次聚合可能需要数秒；3 秒会把正常慢查询误判为失败。
+  const analyticsTimeout = window.setTimeout(() => analyticsController.abort(), 15000)
   const requests = await Promise.allSettled([
       researchApi.dashboard(),
       researchApi.analytics({ signal: analyticsController.signal }),
@@ -601,7 +607,7 @@ onMounted(loadPage)
         </a>
       </div>
 
-      <MacroAnalyticsDashboard v-if="dashboard" user-role="teacher" :class-groups="['实验1班', '实验2班', '对照1班']" />
+      <MacroAnalyticsDashboard v-if="dashboard" :user-role="userStore.profile.role === 'admin' ? 'admin' : 'teacher'" :class-groups="macroClassGroups" />
 
       <section v-if="dashboard" class="card border-0 shadow-sm mt-4 quality-workbench">
         <div class="card-body p-4">

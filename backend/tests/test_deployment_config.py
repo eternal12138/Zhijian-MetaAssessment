@@ -360,6 +360,23 @@ class DeploymentConfigTests(unittest.TestCase):
         self.assertIn('${DATA_DIR}/models/datasets', deploy)
         self.assertIn("models", dockerignore.splitlines())
 
+    def test_macro_analytics_never_falls_back_to_demo_research_results(self):
+        backend = (PROJECT_ROOT / "backend" / "app" / "api" / "research.py").read_text(
+            encoding="utf-8"
+        )
+        frontend = (
+            PROJECT_ROOT / "frontend" / "src" / "components" / "dashboard"
+            / "MacroAnalyticsDashboard.vue"
+        ).read_text(encoding="utf-8")
+        macro_endpoint = backend.split('@router.get("/macro-analytics")', 1)[1]
+        for fabricated_value in ("75.0", "71.2", "68.5", "248, 194, 162", "99.85%", "t = 0.428"):
+            self.assertNotIn(fabricated_value, macro_endpoint)
+        self.assertIn("profile.dimension_details", macro_endpoint)
+        self.assertIn("can_access_user(user, owner)", macro_endpoint)
+        self.assertNotIn("实验1班", frontend)
+        self.assertNotIn("全校常模", frontend)
+        self.assertIn("缺失数据不会使用演示值填充", frontend)
+
 
 if __name__ == "__main__":
     unittest.main()

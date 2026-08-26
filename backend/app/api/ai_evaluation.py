@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from collections import Counter
+import logging
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import and_, case, func, or_, select
@@ -25,6 +26,7 @@ from app.config import get_settings
 
 router = APIRouter(prefix="/research/ai-evaluation", tags=["AI 元认知评估"])
 settings = get_settings()
+logger = logging.getLogger(__name__)
 
 EXPERIMENT_NAMES = {
     "tfidf_linear_svc": "TF-IDF + LinearSVC",
@@ -251,8 +253,16 @@ async def classify_scope(
     if batch:
         try:
             await classify_candidates(db, batch)
+            # Force cache and prediction audit writes here so database failures
+            # are reported as a classification error instead of a generic 500
+            # from a later query-triggered autoflush.
+            await db.flush()
         except Exception as error:
-            await db.commit()
+            await db.rollback()
+            logger.exception(
+                "AI candidate classification failed model=%s batch_size=%s",
+                active.id, len(batch),
+            )
             raise HTTPException(409, f"分类模型执行失败：{error}") from error
     remaining = int(await db.scalar(
         select(func.count()).select_from(statement.order_by(None).subquery())

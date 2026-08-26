@@ -32,13 +32,18 @@ const emit = defineEmits<{
 }>()
 
 const chartRef = ref<HTMLDivElement | null>(null)
+const chartError = ref('')
 let chart: echarts.ECharts | undefined
 
 const indicators = computed(() =>
-  props.scores.map(({ label, max }) => ({
-    name: label,
-    max: max ?? props.globalMax ?? 100
-  }))
+  props.scores
+    .filter(item => item && typeof item.label === 'string' && Number.isFinite(Number(item.score)))
+    .map(({ label, max }) => ({
+      name: label,
+      max: Number.isFinite(Number(max)) && Number(max) > 0
+        ? Number(max)
+        : props.globalMax ?? 100
+    }))
 )
 
 function isDarkMode(): boolean {
@@ -49,15 +54,27 @@ function isDarkMode(): boolean {
 
 function renderChart() {
   if (!chartRef.value) return
-  chart ??= echarts.init(chartRef.value)
+  chartError.value = ''
+  const validScores = props.scores.filter(item => item && Number.isFinite(Number(item.score)))
+  if (validScores.length < 3 || indicators.value.length !== validScores.length) {
+    chart?.clear()
+    chartError.value = '当前数据不足以绘制三维雷达图'
+    return
+  }
+  const validComparison = (props.comparisonScores ?? []).filter(item =>
+    item && Number.isFinite(Number(item.score))
+  )
+  const hasComparison = validComparison.length === validScores.length
 
-  const dark = isDarkMode()
-  const dims = indicators.value
-  const primaryValues = props.scores.map(({ score }) => score)
-  const hasComparison = Boolean(props.comparisonScores && props.comparisonScores.length > 0)
-  const compValues = hasComparison
-    ? props.comparisonScores!.map(({ score }) => score)
-    : []
+  try {
+    chart ??= echarts.init(chartRef.value)
+
+    const dark = isDarkMode()
+    const dims = indicators.value.map(item => ({ ...item }))
+    const primaryValues = validScores.map(({ score }) => Number(score))
+    const compValues = hasComparison
+      ? validComparison.map(({ score }) => Number(score))
+      : []
 
   const seriesData: any[] = [
     {
@@ -94,7 +111,7 @@ function renderChart() {
     })
   }
 
-  const option: echarts.EChartsCoreOption = {
+    const option: echarts.EChartsCoreOption = {
     tooltip: {
       trigger: 'item',
       backgroundColor: dark ? '#242537' : '#ffffff',
@@ -120,14 +137,6 @@ function renderChart() {
         return html
       }
     },
-    legend: hasComparison ? {
-      show: true,
-      bottom: 0,
-      textStyle: {
-        color: dark ? '#abadd0' : '#66687d',
-        fontSize: 12
-      }
-    } : undefined,
     radar: {
       indicator: dims,
       radius: hasComparison ? '62%' : '68%',
@@ -161,25 +170,42 @@ function renderChart() {
       type: 'radar',
       data: seriesData
     }]
-  }
-
-  chart.setOption(option, { notMerge: true })
-
-  // 绑定点击事件，向外派发维度信息
-  chart.off('click')
-  chart.on('click', (params: any) => {
-    if (params.componentType === 'radar' || params.seriesType === 'radar') {
-      const idx = params.dataIndex ?? 0
-      const d = props.scores[idx]
-      if (d) {
-        emit('select-dimension', {
-          dimension: d.dimension,
-          label: d.label,
-          score: d.score
-        })
+    }
+    if (hasComparison) {
+      option.legend = {
+        show: true,
+        bottom: 0,
+        textStyle: {
+          color: dark ? '#abadd0' : '#66687d',
+          fontSize: 12
+        }
       }
     }
-  })
+
+    chart.clear()
+    chart.setOption(option, { notMerge: true })
+
+  // 绑定点击事件，向外派发维度信息
+    chart.off('click')
+    chart.on('click', (params: any) => {
+      if (params.componentType === 'radar' || params.seriesType === 'radar') {
+        const idx = params.dataIndex ?? 0
+        const d = validScores[idx]
+        if (d) {
+          emit('select-dimension', {
+            dimension: d.dimension,
+            label: d.label,
+            score: d.score
+          })
+        }
+      }
+    })
+  } catch (error) {
+    console.error('[RadarChart] render failed:', error)
+    chart?.dispose()
+    chart = undefined
+    chartError.value = '图表引擎暂时无法渲染，分数明细仍可正常查看'
+  }
 }
 
 function resize() {
@@ -201,7 +227,8 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="radar-chart-wrapper">
-    <div ref="chartRef" class="radar-chart" :style="{ height: `${height}px` }" />
+    <div ref="chartRef" class="radar-chart" :class="{ 'has-error': chartError }" :style="{ height: `${height}px` }" />
+    <div v-if="chartError" class="radar-chart-error"><i class="bi bi-bar-chart-line" /><span>{{ chartError }}</span></div>
     <div v-if="showNorm && normReference" class="radar-norm-note">
       <i class="bi bi-info-circle"></i>
       <span>常模参照：{{ normReference }}</span>
@@ -219,6 +246,18 @@ onBeforeUnmount(() => {
 .radar-chart {
   width: 100%;
 }
+.radar-chart.has-error { visibility: hidden; }
+.radar-chart-error {
+  position: absolute;
+  min-height: 180px;
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: .5rem;
+  color: var(--color-text-muted);
+  text-align: center;
+}
+.radar-chart-error i { color: var(--color-primary); font-size: 2rem; }
 .radar-norm-note {
   display: flex;
   align-items: center;

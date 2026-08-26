@@ -89,34 +89,43 @@ async def _embed_texts(
     provider_config = _provider_config(config)
     provider_config.validate()
     keys = [embedding_cache_key(provider_config, text) for text in texts]
+    indices_by_key: dict[str, list[int]] = {}
+    for index, key in enumerate(keys):
+        indices_by_key.setdefault(key, []).append(index)
     existing = list((await db.scalars(
-        select(TextEmbeddingCache).where(TextEmbeddingCache.cache_key.in_(keys))
+        select(TextEmbeddingCache).where(TextEmbeddingCache.cache_key.in_(indices_by_key))
     )).all())
     cached = {item.cache_key: item for item in existing}
     vectors: list[np.ndarray | None] = [None] * len(texts)
-    missing: list[int] = []
-    for index, key in enumerate(keys):
+    missing_keys: list[str] = []
+    for key, indices in indices_by_key.items():
         item = cached.get(key)
         if item and item.dimensions == config["dimensions"]:
             vector = np.frombuffer(item.vector, dtype=np.float32).copy()
             if vector.size == config["dimensions"]:
-                vectors[index] = vector
+                for index in indices:
+                    vectors[index] = vector
                 continue
-        missing.append(index)
+        missing_keys.append(key)
 
     async with RemoteEmbeddingProvider(provider_config) as provider:
-        for start in range(0, len(missing), config["batch_size"]):
-            indices = missing[start:start + config["batch_size"]]
-            result = await provider.embed([texts[index] for index in indices])
-            for index, vector in zip(indices, result.vectors, strict=True):
-                vectors[index] = vector
+        for start in range(0, len(missing_keys), config["batch_size"]):
+            batch_keys = missing_keys[start:start + config["batch_size"]]
+            source_indices = [indices_by_key[key][0] for key in batch_keys]
+            result = await provider.embed([texts[index] for index in source_indices])
+            for key, source_index, vector in zip(
+                batch_keys, source_indices, result.vectors, strict=True,
+            ):
+                normalized_vector = np.asarray(vector, dtype=np.float32)
+                for index in indices_by_key[key]:
+                    vectors[index] = normalized_vector
                 db.add(TextEmbeddingCache(
-                    cache_key=keys[index],
-                    text_hash=text_hash(texts[index]), provider=config["provider"],
+                    cache_key=key,
+                    text_hash=text_hash(texts[source_index]), provider=config["provider"],
                     model=config["model"], model_version=config["version"],
                     dimensions=config["dimensions"], normalized=config["normalized"],
                     instruction_hash=provider_config.instruction_hash,
-                    vector=np.asarray(vector, dtype=np.float32).tobytes(),
+                    vector=normalized_vector.tobytes(),
                 ))
     if any(vector is None for vector in vectors):
         raise ValueError("部分候选未获得嵌入向量")
@@ -125,6 +134,22 @@ async def _embed_texts(
 
 def _redacted_embedding_snapshot(config: dict) -> dict:
     return {key: value for key, value in config.items() if key != "api_key"}
+
+
+def _probe_embedding_features(vectors: object, expected_dimensions: int) -> np.ndarray:
+    """Validate one probe embedding without coercing a NumPy array to bool."""
+    try:
+        matrix = np.asarray(vectors, dtype=np.float32)
+    except (TypeError, ValueError) as error:
+        raise ValueError("Embedding 探针返回了无法解析的向量") from error
+    expected_shape = (1, int(expected_dimensions))
+    if matrix.shape != expected_shape:
+        raise ValueError(
+            f"Embedding 探针向量形状异常：期望 {expected_shape}，实际 {matrix.shape}"
+        )
+    if not np.isfinite(matrix).all():
+        raise ValueError("Embedding 探针返回了非有限数值")
+    return matrix
 
 
 def _prediction_quality(probs: dict[int, float] | None, label: int) -> tuple[float | None, str, bool]:
@@ -164,9 +189,7 @@ async def probe_model_activation(job: ModelTrainingJob, runtime) -> None:
         assert_embedding_identity(trained_identity, provider_config)
         async with RemoteEmbeddingProvider(provider_config) as provider:
             result = await provider.embed([probe_text])
-        if not result.vectors or result.vectors[0] is None:
-            raise ValueError("Embedding 探针未返回向量")
-        features = np.asarray([result.vectors[0]], dtype=np.float32)
+        features = _probe_embedding_features(result.vectors, config["dimensions"])
     else:
         features = [probe_text]
     transformed = (
