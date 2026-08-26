@@ -219,10 +219,17 @@ python -m unittest discover -s research/tests -p "test_*.py" -v
 
 发现缺陷、部署问题或研究流程问题，请通过 [GitHub Issues](https://github.com/eternal12138/Zhijian-MetaAssessment/issues) 提交，并附上复现步骤、运行环境和经过脱敏的日志。请勿在 Issue 中上传真实被试数据、密钥或可识别个人身份的信息。
 
+如果发现安全漏洞，请勿创建公开 Issue。请阅读 [安全声明](SECURITY.md)，并通过 GitHub 仓库的 **Security** 选项卡私密报告，在安全公告发布前不要公开披露漏洞细节。
+
 ## 📄 许可证
 
-本项目采用 [GNU Affero General Public License v3.0](LICENSE) 发布。通过网络向用户提供修改后的程序时，请遵守 AGPL-3.0 对源代码公开的相关要求。
+本项目采用**双重许可**模式，版权所有 © 2026 Li Rui：
+
+1. **开源许可**：[GNU Affero General Public License v3.0](LICENSE)。任何人均可研究、学习、使用和修改本项目，也可进行商业使用；但必须遵守 AGPL-3.0。修改后的版本如果通过网络向用户提供服务，必须向这些用户显著提供相应源代码的获取方式。
+2. **商业许可**：如需将本项目或其修改版本用于闭源产品、闭源在线服务，或希望获得不受 AGPL-3.0 开源义务约束的授权，请阅读 [商业许可说明](COMMERCIAL_LICENSE.md)，并联系 [lir@nenu.edu.cn](mailto:lir@nenu.edu.cn) 另行签署书面商业许可。
+
+除非已经取得单独签署的商业许可，否则默认适用 AGPL-3.0。第三方依赖仍分别适用其原始许可证。
 
 ## 👥 贡献者
 
-感谢所有参与研究设计、产品开发、专家编码、测试与部署的贡献者。欢迎通过 Issue 或 Pull Request 提交改进。
+感谢所有参与研究设计、产品开发、专家编码、测试与部署的贡献者。提交代码或文档前，请阅读 [贡献指南](CONTRIBUTING.md)。外部贡献默认按 AGPL-3.0 进入，除非贡献者与项目所有者另有书面约定，否则不会自动纳入闭源商业许可范围。

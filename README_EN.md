@@ -219,10 +219,17 @@ Every push to `main` and every pull request triggers [GitHub Actions](https://gi
 
 Please report defects, deployment issues, or research-workflow problems through [GitHub Issues](https://github.com/eternal12138/Zhijian-MetaAssessment/issues), including reproduction steps, environment details, and sanitized logs. Never upload real participant data, secrets, or personally identifiable information to an issue.
 
+If you discover a security vulnerability, do not open a public issue. Read the [Security Policy](SECURITY.md) and report it privately through the repository's **Security** tab. Do not publicly disclose vulnerability details before the security advisory is published.
+
 ## 📄 License
 
-This project is licensed under the [GNU Affero General Public License v3.0](LICENSE). If you make a modified version available to users over a network, comply with the AGPL-3.0 source-disclosure requirements.
+This project uses a **dual-licensing** model. Copyright © 2026 Li Rui:
+
+1. **Open-source license:** [GNU Affero General Public License v3.0](LICENSE). Anyone may study, use, modify, and use the project commercially, subject to AGPL-3.0. If a modified version is made available to users over a network, those users must be prominently offered access to its Corresponding Source.
+2. **Commercial license:** If you want to incorporate this project or a modified version into a proprietary product, operate it as a closed-source online service, or avoid AGPL-3.0 source-availability obligations, read the [Commercial Licensing Notice](COMMERCIAL_LICENSE.md) and contact [lir@nenu.edu.cn](mailto:lir@nenu.edu.cn) to negotiate a separate written license.
+
+AGPL-3.0 applies by default unless a separate commercial license has been signed. Third-party dependencies remain subject to their respective licenses.
 
 ## 👥 Contributors
 
-Thank you to everyone contributing to the research design, application development, expert coding, testing, and deployment. Improvements are welcome through issues and pull requests.
+Thank you to everyone contributing to the research design, application development, expert coding, testing, and deployment. Before submitting code or documentation, read the [Contributing Guide](CONTRIBUTING.md). External contributions are accepted under AGPL-3.0 and are not automatically included in proprietary commercial licensing unless the contributor and Project Owner agree separately in writing.
