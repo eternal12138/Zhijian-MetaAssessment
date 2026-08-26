@@ -9,22 +9,32 @@ import type { DimensionScore } from '../../types/assessment'
 
 use([RadarChart, CanvasRenderer, RadarComponent, TooltipComponent, LegendComponent])
 
+interface RadarComparisonSeries {
+  name: string
+  scores: DimensionScore[]
+  color?: string
+  dashed?: boolean
+}
+
 const props = withDefaults(defineProps<{
   scores: DimensionScore[]
   name?: string
   comparisonScores?: DimensionScore[]
   comparisonName?: string
+  comparisonSeries?: RadarComparisonSeries[]
   height?: number
   showNorm?: boolean
   normReference?: string
   globalMax?: number
+  valueUnit?: string
 }>(), {
   name: '本次测评',
   comparisonName: '对比测评',
   height: 320,
   showNorm: false,
   normReference: '',
-  globalMax: 100
+  globalMax: 100,
+  valueUnit: ''
 })
 
 const emit = defineEmits<{
@@ -61,10 +71,22 @@ function renderChart() {
     chartError.value = '当前数据不足以绘制三维雷达图'
     return
   }
-  const validComparison = (props.comparisonScores ?? []).filter(item =>
-    item && Number.isFinite(Number(item.score))
-  )
-  const hasComparison = validComparison.length === validScores.length
+  const comparisonInputs: RadarComparisonSeries[] = []
+  if (props.comparisonScores?.length) {
+    comparisonInputs.push({
+      name: props.comparisonName,
+      scores: props.comparisonScores,
+      dashed: true
+    })
+  }
+  comparisonInputs.push(...(props.comparisonSeries ?? []))
+  const validComparisons = comparisonInputs
+    .map(item => ({
+      ...item,
+      scores: item.scores.filter(score => score && Number.isFinite(Number(score.score)))
+    }))
+    .filter(item => item.scores.length === validScores.length)
+  const hasComparison = validComparisons.length > 0
 
   try {
     chart ??= echarts.init(chartRef.value)
@@ -72,11 +94,7 @@ function renderChart() {
     const dark = isDarkMode()
     const dims = indicators.value.map(item => ({ ...item }))
     const primaryValues = validScores.map(({ score }) => Number(score))
-    const compValues = hasComparison
-      ? validComparison.map(({ score }) => Number(score))
-      : []
-
-  const seriesData: any[] = [
+    const seriesData: any[] = [
     {
       value: primaryValues,
       name: props.name,
@@ -91,25 +109,25 @@ function renderChart() {
         color: dark ? '#7573e7' : '#4b49ac'
       }
     }
-  ]
+    ]
 
-  if (hasComparison) {
-    seriesData.push({
-      value: compValues,
-      name: props.comparisonName,
-      areaStyle: {
-        color: dark ? 'rgba(52, 195, 143, 0.2)' : 'rgba(33, 140, 104, 0.15)'
-      },
-      lineStyle: {
-        color: dark ? '#34c38f' : '#218c68',
-        width: 2,
-        type: 'dashed'
-      },
-      itemStyle: {
-        color: dark ? '#34c38f' : '#218c68'
-      }
+    const comparisonColors = dark
+      ? ['#34c38f', '#22d3ee', '#f59e0b', '#ec4899']
+      : ['#218c68', '#0891b2', '#d97706', '#db2777']
+    validComparisons.forEach((item, index) => {
+      const color = item.color || comparisonColors[index % comparisonColors.length]
+      seriesData.push({
+        value: item.scores.map(({ score }) => Number(score)),
+        name: item.name,
+        areaStyle: { color: `${color}20` },
+        lineStyle: {
+          color,
+          width: 2,
+          type: item.dashed === false ? 'solid' : 'dashed'
+        },
+        itemStyle: { color }
+      })
     })
-  }
 
     const option: echarts.EChartsCoreOption = {
     tooltip: {
@@ -128,7 +146,7 @@ function renderChart() {
           const pct = d.max > 0 ? Math.round((val / d.max) * 100) : 0
           html += `<div style="display:flex;justify-content:space-between;gap:16px;margin:3px 0;">
             <span>${d.name}:</span>
-            <strong>${typeof val === 'number' ? val.toFixed(1) : val} / ${d.max} (${pct}%)</strong>
+            <strong>${typeof val === 'number' ? val.toFixed(1) : val}${props.valueUnit || ` / ${d.max} (${pct}%)`}</strong>
           </div>`
         })
         if (props.showNorm && props.normReference) {
@@ -217,7 +235,19 @@ onMounted(() => {
   window.addEventListener('resize', resize)
 })
 
-watch(() => [props.scores, props.comparisonScores, props.globalMax], renderChart, { deep: true })
+watch(
+  () => [
+    props.scores,
+    props.name,
+    props.comparisonScores,
+    props.comparisonName,
+    props.comparisonSeries,
+    props.globalMax,
+    props.valueUnit
+  ],
+  renderChart,
+  { deep: true }
+)
 
 onBeforeUnmount(() => {
   window.removeEventListener('resize', resize)

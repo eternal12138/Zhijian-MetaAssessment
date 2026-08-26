@@ -106,10 +106,14 @@ class QuestionnaireSubmitIn(BaseModel):
 
 class ProtocolConfigUpdate(BaseModel):
     questionnaire_enabled: bool
+    behavior_weight: float = Field(default=0.6, ge=0.0, le=1.0)
+    questionnaire_weight: float = Field(default=0.4, ge=0.0, le=1.0)
 
 
 class ProtocolConfigOut(BaseModel):
     questionnaire_enabled: bool
+    behavior_weight: float = 0.6
+    questionnaire_weight: float = 0.4
     updated_at: datetime | None = None
 
 

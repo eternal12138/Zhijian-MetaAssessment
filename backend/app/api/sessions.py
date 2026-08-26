@@ -40,6 +40,10 @@ from app.services.audio_manifest import AudioManifestError
 router = APIRouter(prefix="/sessions", tags=["测评会话"])
 settings = get_settings()
 SAFE_SESSION_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+LEGACY_DIALOGUE_DETAIL = {
+    "code": "LEGACY_DIALOGUE_WORKFLOW_RETIRED",
+    "message": "实时对话测评链路已停用，请使用固定协议的录音、转录与交互事件接口",
+}
 ALLOWED_AUDIO_MIME_TYPES = {
     "audio/webm",
     "audio/mp4",
@@ -113,6 +117,7 @@ async def chat_sse(
     db: AsyncSession = Depends(get_db),
 ):
     """记录被试发言；仅明确的静默提醒事件允许主试输出固定提示。"""
+    raise HTTPException(status_code=status.HTTP_410_GONE, detail=LEGACY_DIALOGUE_DETAIL)
 
     if not SAFE_SESSION_ID.fullmatch(data.session_id):
         raise HTTPException(status_code=400, detail="会话 ID 格式不合法")
@@ -173,6 +178,7 @@ async def get_session_history(
     db: AsyncSession = Depends(get_db),
 ):
     """获取当前用户的会话对话历史。"""
+    raise HTTPException(status_code=status.HTTP_410_GONE, detail=LEGACY_DIALOGUE_DETAIL)
     session = await db.get(AssessmentSession, session_id)
     if not session:
         raise HTTPException(status_code=404, detail="会话不存在")
@@ -443,6 +449,7 @@ async def send_message(
     db: AsyncSession = Depends(get_db),
 ):
     """记录一轮被试发言；正式任务不自动触发 AI 追问或实时编码。"""
+    raise HTTPException(status_code=status.HTTP_410_GONE, detail=LEGACY_DIALOGUE_DETAIL)
     session = await _get_session(session_id, db)
     if session.user_id != user.id:
         raise HTTPException(status_code=403, detail="无权操作此会话")
@@ -551,6 +558,8 @@ async def complete_session(
 @router.websocket("/{session_id}/ws")
 async def session_websocket(websocket: WebSocket, session_id: str):
     """WebSocket 实时对话通道"""
+    await websocket.close(code=4404, reason=LEGACY_DIALOGUE_DETAIL["message"])
+    return
     token = websocket.query_params.get("token", "")
     payload = decode_token(token)
     user_id = payload.get("sub") if payload else None

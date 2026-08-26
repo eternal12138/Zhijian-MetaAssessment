@@ -27,11 +27,13 @@ from app.services.model_artifacts import load_model_artifact, load_tfidf_fallbac
 from app.services.model_training import _job_config, _provider_config
 from app.services.runtime_model_config import load_runtime_model_settings
 
+# 生产标准三分类体系：1: 监控 (monitoring), 2: 调控/控制 (controlDebugging), 3: 评估 (evaluation)
 DIMENSION_MAP = {
-    0: "non_meta",
     1: "monitoring",
     2: "controlDebugging",
     3: "evaluation",
+    # 兼容旧版遗留数据/降级兜底
+    0: "non_meta",
 }
 
 
@@ -63,9 +65,10 @@ def apply_tfidf_fallback(
 ) -> None:
     predictions = fallback.predict(texts)
     fallback_labels = {
-        "non_metacognitive": 0, "monitoring": 1,
-        "regulation": 2, "evaluation": 3,
-        0: 0, 1: 1, 2: 2, 3: 3,
+        "monitoring": 1, "regulation": 2, "controlDebugging": 2, "control": 2, "evaluation": 3,
+        1: 1, 2: 2, 3: 3,
+        # 兼容旧版4分类降级
+        "non_metacognitive": 0, "non_meta": 0, 0: 0,
     }
     for candidate, raw_label in zip(candidates, predictions, strict=True):
         if raw_label not in fallback_labels:
@@ -74,7 +77,7 @@ def apply_tfidf_fallback(
         candidate.classifier_job_id = active.id
         candidate.classifier_version = active.version
         candidate.predicted_label = label
-        candidate.predicted_dimension = DIMENSION_MAP[label]
+        candidate.predicted_dimension = DIMENSION_MAP.get(label, "monitoring")
         candidate.prediction_confidence = None
         candidate.prediction_probabilities = None
         candidate.classified_at = utc_now_naive()

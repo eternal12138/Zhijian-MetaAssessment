@@ -3,7 +3,7 @@ import apiClient from './client'
 
 export interface MethodTemplate {
   id: string
-  template_key: 'metacognitive_extractor' | 'coding_prompt' | 'scoring_standard' | 'intervention_templates'
+  template_key: 'report_prompt' | 'metacognitive_extractor'
   version: string
   kind: 'prompt' | 'scoring' | 'intervention'
   content: string
@@ -29,30 +29,6 @@ export interface AnalysisJob {
   progress: number
   error_message: string
   result_profile_id: string | null
-}
-
-export interface ReviewAssignment {
-  coding_id: string
-  session_id: string
-  run_id: string | null
-  task_id: string
-  segment: string
-  ai_dimension: string | null
-  ai_score: number | null
-  ai_reason: string
-  ai_confidence: number
-  completed_reviews: number
-}
-
-export interface Disagreement {
-  coding_id: string
-  segment: string
-  annotations: Array<{
-    reviewer_id: string
-    dimension: string | null
-    score: number | null
-    note: string
-  }>
 }
 
 export interface CodingReviewer {
@@ -210,7 +186,15 @@ export interface ResearchDashboard {
   unanalyzed_runs: Array<{
     run_id: string
     user_id: string
-    completed_at: string
+    user_name?: string
+    username?: string
+    class_group?: string
+    tasks?: Array<{
+      task_id: string
+      title: string
+      sequence_no: number
+    }>
+    completed_at?: string
   }>
   recent_reports: Array<{
     id: string
@@ -229,6 +213,13 @@ export interface ResearchDashboard {
 
 export interface MacroAnalytics {
   class_name: string
+  selected_participant_id: string | null
+  available_participants: Array<{
+    id: string
+    name: string
+    username: string
+    class_group: string | null
+  }>
   generated_at: string
   available_class_groups: string[]
   sample_count: number
@@ -236,6 +227,12 @@ export interface MacroAnalytics {
   class_averages: Array<{ dimension: 'monitoring' | 'controlDebugging' | 'evaluation'; label: string; score: number; max: number }>
   reference_averages: Array<{ dimension: 'monitoring' | 'controlDebugging' | 'evaluation'; label: string; score: number; max: number }>
   profile_source: string
+  radar_profiles: {
+    selected: MacroRadarProfile
+    participant: MacroRadarProfile | null
+    class_group: MacroRadarProfile | null
+    overall: MacroRadarProfile
+  }
   order_balance: {
     groupAB: MacroOrderGroup
     groupBA: MacroOrderGroup
@@ -249,7 +246,7 @@ export interface MacroAnalytics {
     }
   }
   dimension_distribution: {
-    primary_source: 'expert_consensus' | 'production_model' | 'none'
+    primary_source: 'expert_consensus' | 'production_model' | 'hybrid' | 'none'
     counts: Record<'monitoring' | 'controlDebugging' | 'evaluation', number>
     total: number
     expert_consensus_total: number
@@ -262,6 +259,22 @@ export interface MacroAnalytics {
     extraction: { statuses: Record<string, number>; total: number }
     classification: { eligible_candidates: number; classified_candidates: number; coverage_rate: number | null }
   }
+}
+
+export interface MacroRadarProfile {
+  scope: 'participant' | 'class' | 'overall' | 'accessible'
+  label: string
+  counts: Record<'monitoring' | 'controlDebugging' | 'evaluation', number>
+  percentages: Record<'monitoring' | 'controlDebugging' | 'evaluation', number>
+  total: number
+  sample_count: number
+  primary_source: 'expert_consensus' | 'production_model' | 'hybrid' | 'none'
+  scores: Array<{
+    dimension: 'monitoring' | 'controlDebugging' | 'evaluation'
+    label: string
+    score: number
+    max: number
+  }>
 }
 
 export interface MacroOrderGroup {
@@ -402,6 +415,8 @@ export interface ModelTrainingJob {
     accuracy?: number
     macro_precision?: number
     macro_recall?: number
+    weighted_precision?: number
+    weighted_recall?: number
     macro_specificity?: number
     macro_f1?: number
     weighted_f1?: number
@@ -418,6 +433,15 @@ export interface ModelTrainingJob {
       accuracy: number
       macro_precision: number
       macro_recall: number
+      weighted_precision?: number
+      weighted_recall?: number
+      macro_auc_ovr?: number | null
+      cross_entropy?: number | null
+      per_class_auc?: Record<string, number | null>
+      train_participant_count?: number | null
+      test_participant_count?: number | null
+      participant_overlap_count?: number | null
+      subject_disjoint_verified?: boolean | null
       macro_specificity?: number
       macro_f1: number
     }>
@@ -546,6 +570,8 @@ export interface ModelEvaluation {
     accuracy: number | null
     macro_precision: number | null
     macro_recall: number | null
+    weighted_precision: number | null
+    weighted_recall: number | null
     macro_specificity: number | null
     macro_f1: number | null
     weighted_f1: number | null
@@ -574,11 +600,25 @@ export interface ModelEvaluation {
     macro_f1_min: number | null
     macro_f1_max: number | null
     macro_f1_range: number | null
+    macro_auc_mean: number | null
+    macro_auc_std: number | null
+    macro_auc_min: number | null
+    macro_auc_max: number | null
+    macro_auc_range: number | null
+    macro_f1_interval: MetricFoldInterval
+    macro_auc_interval: MetricFoldInterval
+    per_class_auc_intervals: Record<string, MetricFoldInterval>
     train_macro_f1_mean: number | null
     train_test_macro_f1_gap: number | null
     train_sample_counts: number[]
     test_sample_counts: number[]
     folds: NonNullable<NonNullable<ModelTrainingJob['metrics']>['folds']>
+    subject_disjoint_audit: {
+      available: boolean
+      all_folds_verified: boolean
+      maximum_overlap_count: number | null
+      note: string
+    }
   }
   dataset: {
     version: string | null
@@ -606,12 +646,43 @@ export interface ModelEvaluation {
   roc_evaluation: NonNullable<ModelTrainingJob['metrics']>['roc_evaluation'] | null
   subject_leakage_risk: boolean | null
   evaluation_warning: string | null
+  error_analysis: {
+    total_error_count: number
+    displayed_error_count: number
+    cases: Array<{
+      participant_id: string | null
+      text: string
+      true_label: number
+      predicted_label: number
+    }>
+    metadata_availability: Record<string, boolean>
+    note: string
+  } | null
+  evidence_coverage: {
+    subject_level_split: boolean
+    fold_uncertainty: boolean
+    independent_external_holdout: boolean
+    pairwise_statistical_test: boolean
+    cross_task_transfer: boolean
+    expert_reliability_bound_to_dataset: boolean
+    asr_quality_bound_to_dataset: boolean
+    notes: Record<string, string>
+  }
   source: {
     type: 'training_evaluation_result'
     manifest_schema_version: number
     legacy_synthesized: boolean
     metrics_sha256: string
   }
+}
+
+export interface MetricFoldInterval {
+  mean: number | null
+  std: number | null
+  ci95_low: number | null
+  ci95_high: number | null
+  n: number
+  method?: string
 }
 
 export interface ModelEvaluationVersion {
@@ -752,12 +823,6 @@ export const researchApi = {
   listModelEvaluations() {
     return apiClient.get<ModelEvaluationIndex>('/research/model-training/evaluations')
   },
-  getModelEvaluation(jobId: string) {
-    return apiClient.get<ModelEvaluation>(`/research/model-training/jobs/${jobId}/evaluation`)
-  },
-  getModelTrainingJob(jobId: string) {
-    return apiClient.get<ModelTrainingJob>(`/research/model-training/jobs/${jobId}`)
-  },
   activateModelTrainingJob(jobId: string) {
     return apiClient.post<ModelTrainingJob>(`/research/model-training/jobs/${jobId}/activate`)
   },
@@ -775,6 +840,12 @@ export const researchApi = {
   },
   exportModelTrainingReport(jobId: string) {
     return apiClient.get<Blob>(`/research/model-training/jobs/${jobId}/export`, {
+      responseType: 'blob',
+      timeout: 120_000
+    })
+  },
+  exportModelErrorCases(jobId: string) {
+    return apiClient.get<Blob>(`/research/model-training/jobs/${jobId}/error-cases/export`, {
       responseType: 'blob',
       timeout: 120_000
     })
@@ -820,20 +891,6 @@ export const researchApi = {
   },
   analytics(config?: AxiosRequestConfig) {
     return apiClient.get<ResearchAnalytics>('/research/analytics', config)
-  },
-  listAssignments() {
-    return apiClient.get<ReviewAssignment[]>('/research/review/assignments')
-  },
-  annotate(codingId: string, dimension: string | null, score: number | null, note: string) {
-    return apiClient.post(`/research/review/codings/${codingId}`, { dimension, score, note })
-  },
-  listDisagreements() {
-    return apiClient.get<Disagreement[]>('/research/review/disagreements')
-  },
-  adjudicate(codingId: string, dimension: string | null, score: number | null, note: string) {
-    return apiClient.post(`/research/review/codings/${codingId}/adjudicate`, {
-      dimension, score, note
-    })
   },
   listCodingReviewers() {
     return apiClient.get<CodingReviewer[]>('/research/review/reviewers')
@@ -952,9 +1009,9 @@ export const researchApi = {
       { user_ids: userIds }
     )
   },
-  getMacroAnalytics(classGroup = 'all') {
+  getMacroAnalytics(classGroup = 'all', participantId?: string) {
     return apiClient.get<MacroAnalytics>('/research/macro-analytics', {
-      params: { class_group: classGroup }
+      params: { class_group: classGroup, participant_id: participantId || undefined }
     })
   }
 }

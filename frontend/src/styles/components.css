@@ -220,7 +220,14 @@ a:focus-visible {
 .nav-pills .nav-link.active { color: #fff; background: var(--primary); box-shadow: var(--shadow-sm); }
 .list-group-item-action { transition: color var(--motion-fast) ease, background-color var(--motion-fast) ease, transform var(--motion-fast) var(--ease-out); }
 .list-group-item-action:hover { color: var(--primary); background: var(--color-surface-subtle); }
-.list-group-item.active { border-color: var(--primary); background: var(--primary); }
+.list-group-item.active {
+  z-index: 2;
+  color: #fff !important;
+  border-color: var(--color-primary, #6366f1) !important;
+  background-color: var(--color-primary, #6366f1) !important;
+  font-weight: 600;
+  box-shadow: 0 4px 14px rgba(99, 102, 241, 0.35);
+}
 .dropdown-menu { padding: .45rem; border-color: var(--color-border); border-radius: var(--radius-md); box-shadow: var(--shadow-md); background: var(--color-surface); }
 .dropdown-item { border-radius: var(--radius-sm); color: var(--color-text-secondary); }
 .dropdown-item:hover,
@@ -401,10 +408,21 @@ html[data-theme="dark"] .card-footer {
   border-color: var(--color-border) !important;
   color: var(--color-text);
 }
-html[data-theme="dark"] .list-group-item {
+html[data-theme="dark"] .list-group-item:not(.active) {
   background-color: var(--color-surface) !important;
   border-color: var(--color-border) !important;
-  color: var(--color-text);
+  color: var(--color-text) !important;
+}
+html[data-theme="dark"] .list-group-item.active {
+  background: linear-gradient(135deg, #6366f1, #4f46e5) !important;
+  border-color: #6366f1 !important;
+  color: #ffffff !important;
+  font-weight: 600;
+  box-shadow: 0 0 16px rgba(99, 102, 241, 0.5), inset 0 0 0 1px rgba(255, 255, 255, 0.2) !important;
+}
+html[data-theme="dark"] .list-group-item-action:not(.active):hover {
+  background-color: var(--color-surface-subtle) !important;
+  color: var(--color-primary-light, #818cf8) !important;
 }
 html[data-theme="dark"] .dropdown-menu {
   background-color: var(--color-surface) !important;

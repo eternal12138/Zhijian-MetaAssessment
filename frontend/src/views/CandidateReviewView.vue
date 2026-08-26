@@ -1014,11 +1014,14 @@ onBeforeUnmount(() => {
                     <span v-else-if="currentJobStatus === 'retry_wait'">模型请求暂时失败，正在等待自动重试（{{ currentTrackedTask?.retry_count ?? detail.job.retry_count }}/{{ currentTrackedTask?.max_retries ?? detail.job.max_retries }}）。</span>
                     <span v-else-if="currentJobStatus === 'reviewing'">已生成 {{ currentJobCandidateCount }} 条候选，等待人工听取录音并复核。</span>
                     <span v-else-if="currentJobStatus === 'reviewed'">该版本的候选已经完成人工复核。</span>
-                    <span v-else-if="currentJobStatus === 'failed'">{{ currentTrackedTask?.error_message || detail.job.error_message || '抽取未能完成，请检查模型服务后重试。' }}</span>
+                    <span v-else-if="currentJobStatus === 'failed'" class="text-danger d-block">
+                      <strong>失败原因：</strong>{{ currentTrackedTask?.error_message || detail.job.error_message || '抽取未能完成，请检查模型服务后重试。' }}
+                    </span>
                     <span v-else>该版本已作为历史记录保留。</span>
                   </div>
                 </div>
                 <button v-if="detail.transcript_version_id && !detail.job" class="btn btn-primary" :disabled="busyId === 'enqueue'" @click="enqueue">开始候选抽取</button>
+                <button v-else-if="detail.transcript_version_id && currentJobStatus === 'failed'" class="btn btn-danger" :disabled="busyId === 'rerun'" @click="rerunExtraction"><i class="bi bi-arrow-clockwise me-1"></i>重新抽取</button>
                 <button v-else-if="detail.transcript_version_id" class="btn btn-outline-primary" :disabled="busyId === 'rerun' || ['queued', 'running', 'retry_wait'].includes(latestJob ? displayedJobStatus(latestJob) : '')" @click="rerunExtraction"><i class="bi bi-arrow-repeat me-1"></i>生成新抽取版本</button>
                 <button v-if="detail.job && detail.candidate_total" class="btn btn-outline-secondary" :disabled="busyId === 'classify' || ['queued','running','retry_wait'].includes(currentJobStatus)" @click="classifyCurrentCandidates"><span v-if="busyId === 'classify'" class="spinner-border spinner-border-sm me-1"></span><i v-else class="bi bi-cpu me-1"></i>使用当前模型分类</button>
               </div>

@@ -2,23 +2,6 @@
  * 测评会话 API
  */
 import apiClient from './client'
-import type { DialogueTurn } from '../types/assessment'
-
-export interface ChatRequest {
-  session_id: string
-  message: string
-  event?: 'participant_turn' | 'silence_reminder'
-  reminder_index?: number
-}
-
-export interface ChatResponse {
-  turn: DialogueTurn
-  /** AI 实时编码的维度标签 */
-  dimension_tags?: Array<{
-    dimension: string
-    label: string
-  }>
-}
 
 export interface AudioChunkUpload {
   blob: Blob
@@ -101,21 +84,6 @@ export const sessionApi = {
     }>(`/sessions/${sessionId}`)
   },
 
-  /** 创建新测评会话 */
-  create(taskId: string = 'task-001-default') {
-    return apiClient.post('/sessions', { task_id: taskId })
-  },
-
-  /** 发送对话消息（非流式） */
-  chat(data: ChatRequest) {
-    return apiClient.post<ChatResponse>('/sessions/chat', data)
-  },
-
-  /** 获取会话历史 */
-  history(sessionId: string) {
-    return apiClient.get(`/sessions/${sessionId}/history`)
-  },
-
   /** 上传一个录音分片；后端按 chunkIndex 幂等保存 */
   uploadAudioChunk(sessionId: string, chunk: AudioChunkUpload) {
     const form = new FormData()
@@ -140,10 +108,6 @@ export const sessionApi = {
       `/sessions/${sessionId}/events`,
       { events }
     )
-  },
-
-  listEvents(sessionId: string) {
-    return apiClient.get<InteractionEventRecord[]>(`/sessions/${sessionId}/events`)
   },
 
   /** 完成会话并触发生成报告 */

@@ -75,8 +75,8 @@ const statusPresentation: Record<AsrJobStatus, {
     badge: 'bg-danger-subtle text-danger-emphasis'
   },
   waiting_configuration: {
-    label: '等待服务配置',
-    detail: '管理员完成 ASR 配置后即可继续识别。',
+    label: 'ASR 未开启/未配置',
+    detail: '当前服务端 ASR 处于关闭或未配置状态。配置开启后可随时手动触发识别；亦可直接进行人工转录。',
     icon: 'bi-gear-fill',
     badge: 'bg-warning-subtle text-warning-emphasis'
   }
@@ -93,6 +93,9 @@ const hasActiveJob = computed(() =>
     const status = statuses.value[id]?.job?.status
     return !status || ['queued', 'preparing_audio', 'transcribing', 'retry_wait'].includes(status)
   })
+)
+const hasWaitingConfig = computed(() =>
+  props.sessionIds.some(id => statuses.value[id]?.job?.status === 'waiting_configuration')
 )
 const missingJobIds = computed(() => new Set(
   props.sessionIds.filter(id => (
@@ -225,6 +228,13 @@ defineExpose({ refresh: loadStatuses })
     <div v-if="errorMessage" class="alert alert-danger py-2 small" aria-live="polite">
       {{ errorMessage }}
     </div>
+    <div v-if="hasWaitingConfig" class="alert alert-warning py-2 px-3 small d-flex align-items-center gap-2 mb-2" role="status">
+      <i class="bi bi-info-circle-fill text-warning flex-shrink-0" style="font-size: 1.1rem;"></i>
+      <div>
+        <strong>服务端 ASR 处于未开启/未配置状态：</strong>
+        录音数据已完整保存。若管理员已在后台开启 ASR 服务，可点击每项右侧“手动触发识别”；亦可由教师直接在转录校订页进行人工转录。
+      </div>
+    </div>
     <div v-if="missingJobIds.size" class="alert alert-warning py-2 small" aria-live="polite">
       {{ missingJobIds.size }} 项识别任务尚未建立。系统正在自动恢复，您也可以点击“重新提交”。
     </div>
@@ -265,12 +275,14 @@ defineExpose({ refresh: loadStatuses })
           <p class="small text-muted mb-0 mt-1">
             {{ presentation(statuses[sessionId]?.job?.status, missingJobIds.has(sessionId)).detail }}
           </p>
-          <p
+          <div
             v-if="statuses[sessionId]?.job?.error_message"
-            class="small text-danger mb-0 mt-1 text-break"
+            class="alert alert-danger py-1 px-2 small mb-0 mt-2 text-break"
+            role="alert"
           >
-            {{ statuses[sessionId]?.job?.error_message }}
-          </p>
+            <i class="bi bi-exclamation-triangle-fill me-1"></i>
+            <strong>失败原因：</strong>{{ statuses[sessionId]?.job?.error_message }}
+          </div>
           <small
             v-if="statuses[sessionId]?.authoritative_version"
             class="text-success d-block mt-1"
@@ -284,10 +296,11 @@ defineExpose({ refresh: loadStatuses })
             allowRetry
             && (
               missingJobIds.has(sessionId)
-              || ['failed', 'retry_wait'].includes(statuses[sessionId]?.job?.status ?? '')
+              || ['failed', 'retry_wait', 'waiting_configuration'].includes(statuses[sessionId]?.job?.status ?? '')
             )
           "
-          class="btn btn-sm btn-outline-danger flex-shrink-0"
+          class="btn btn-sm flex-shrink-0"
+          :class="statuses[sessionId]?.job?.status === 'waiting_configuration' ? 'btn-outline-primary' : 'btn-outline-danger'"
           :disabled="retryingId === sessionId"
           @click="retry(sessionId)"
         >
@@ -295,7 +308,7 @@ defineExpose({ refresh: loadStatuses })
             v-if="retryingId === sessionId"
             class="spinner-border spinner-border-sm me-1"
           />
-          {{ missingJobIds.has(sessionId) ? '重新提交' : '重新识别' }}
+          {{ missingJobIds.has(sessionId) ? '重新提交' : statuses[sessionId]?.job?.status === 'waiting_configuration' ? '手动触发识别' : '重新识别' }}
         </button>
       </article>
     </div>

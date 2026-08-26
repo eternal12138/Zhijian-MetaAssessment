@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlencode
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from fastapi.responses import FileResponse
 from starlette.background import BackgroundTask
 from sqlalchemy import func, or_, select, update
@@ -52,6 +52,7 @@ from app.schemas.research import (
     RunQualityDecisionIn, RunQualityOut,
     TemplateAuditOut, TemplateOut, TemplateUpdateIn,
 )
+from app.services.method_templates import DEFAULT_TEMPLATES
 from app.services.report_analyzer import generate_run_report
 from app.services.audio_manifest import build_audio_manifest
 from app.services.audio_processor import merge_and_transcode
@@ -66,12 +67,23 @@ from app.services.research_export import (
 from app.services.questionnaire import CURRENT_QUESTIONNAIRE_SOURCE
 from app.services.run_quality import evaluate_run_quality, quality_allows_analysis
 from app.services.notifications import create_notification
+from app.services.metacognition_distribution import (
+    DIMENSIONS as METACOGNITION_DIMENSIONS,
+    aggregate_distribution,
+    normalize_dimension,
+    resolve_run_distributions,
+)
 from app.services.secure_download import sign_download, verify_download
 from app.services.expert_dataset import (
     EXPERT_LABELS, LABEL_MODES, TEXT_SOURCES, build_training_csv,
 )
 
 router = APIRouter(prefix="/research", tags=["第四阶段研究工作流"])
+
+LEGACY_REVIEW_DETAIL = {
+    "code": "LEGACY_REVIEW_WORKFLOW_RETIRED",
+    "message": "旧版编码复核流程已停用，请使用固定批次双人盲编与仲裁工作流",
+}
 settings = get_settings()
 EXPORT_DOWNLOAD_TTL_SECONDS = 60 * 60
 
@@ -144,6 +156,7 @@ async def _accessible_run(run_id: str, user: User, db: AsyncSession) -> Assessme
 
 def _quality_load_options():
     return (
+        selectinload(AssessmentRun.sessions).selectinload(AssessmentSession.task),
         selectinload(AssessmentRun.sessions).selectinload(AssessmentSession.audio_chunks),
         selectinload(AssessmentRun.sessions).selectinload(AssessmentSession.asr_jobs),
         selectinload(AssessmentRun.sessions).selectinload(AssessmentSession.transcript_versions),
@@ -298,7 +311,29 @@ async def list_templates(
             MethodTemplate.created_at.desc(),
         )
     )
-    return result.scalars().all()
+    items = list(result.scalars().all())
+    existing_keys = {item.template_key for item in items}
+    missing_keys = [key for key in DEFAULT_TEMPLATES if key not in existing_keys]
+    if missing_keys:
+        for key in missing_keys:
+            tmpl = DEFAULT_TEMPLATES[key]
+            template = MethodTemplate(
+                template_key=key,
+                kind=tmpl.get("kind", "prompt"),
+                version=str(tmpl.get("version", "1.0")),
+                content=str(tmpl.get("content", "")),
+                is_active=True,
+            )
+            db.add(template)
+        await db.flush()
+        result = await db.execute(
+            select(MethodTemplate).order_by(
+                MethodTemplate.template_key.asc(),
+                MethodTemplate.created_at.desc(),
+            )
+        )
+        items = list(result.scalars().all())
+    return items
 
 
 @router.get("/templates/audit", response_model=list[TemplateAuditOut])
@@ -340,17 +375,13 @@ async def replace_template(
     user: User = Depends(require_role("admin")),
     db: AsyncSession = Depends(get_db),
 ):
-    if template_key not in {"metacognitive_extractor", "coding_prompt", "scoring_standard", "intervention_templates"}:
+    if template_key not in {"metacognitive_extractor", "report_prompt"}:
         raise HTTPException(status_code=422, detail="不支持的模板键")
-    if template_key == "coding_prompt" and "{segments}" not in data.content:
-        raise HTTPException(status_code=422, detail="编码提示词必须保留 {segments} 占位符")
+    if template_key == "report_prompt":
+        if "{overall_score}" not in data.content or "{dimension_results}" not in data.content:
+            raise HTTPException(status_code=422, detail="报告提示词必须保留 {overall_score} 和 {dimension_results} 占位符")
     if template_key == "metacognitive_extractor" and "{segments}" not in data.content:
         raise HTTPException(status_code=422, detail="候选抽取提示词必须保留 {segments} 占位符")
-    if data.kind in {"scoring", "intervention"}:
-        try:
-            json.loads(data.content)
-        except json.JSONDecodeError as error:
-            raise HTTPException(status_code=422, detail="该模板必须是合法 JSON") from error
     duplicate = await db.scalar(
         select(func.count(MethodTemplate.id)).where(
             MethodTemplate.template_key == template_key,
@@ -1514,6 +1545,7 @@ async def list_review_assignments(
     user: User = Depends(require_role("teacher", "admin")),
     db: AsyncSession = Depends(get_db),
 ):
+    raise HTTPException(status_code=status.HTTP_410_GONE, detail=LEGACY_REVIEW_DETAIL)
     result = await db.execute(
         select(CodedSegment, AssessmentSession, User)
         .join(AssessmentSession, AssessmentSession.id == CodedSegment.session_id)
@@ -1555,6 +1587,7 @@ async def submit_annotation(
     user: User = Depends(require_role("teacher", "admin")),
     db: AsyncSession = Depends(get_db),
 ):
+    raise HTTPException(status_code=status.HTTP_410_GONE, detail=LEGACY_REVIEW_DETAIL)
     result = await db.execute(
         select(CodedSegment)
         .where(CodedSegment.id == coding_id)
@@ -1609,6 +1642,7 @@ async def list_disagreements(
     user: User = Depends(require_role("admin")),
     db: AsyncSession = Depends(get_db),
 ):
+    raise HTTPException(status_code=status.HTTP_410_GONE, detail=LEGACY_REVIEW_DETAIL)
     result = await db.execute(
         select(CodedSegment).where(CodedSegment.transcript_segment_id.is_not(None))
     )
@@ -1647,6 +1681,7 @@ async def adjudicate_coding(
     user: User = Depends(require_role("admin")),
     db: AsyncSession = Depends(get_db),
 ):
+    raise HTTPException(status_code=status.HTTP_410_GONE, detail=LEGACY_REVIEW_DETAIL)
     result = await db.execute(
         select(CodedSegment)
         .where(CodedSegment.id == coding_id)
@@ -2165,12 +2200,24 @@ async def research_dashboard(
             {
                 "run_id": run.id,
                 "user_id": owner.id,
-                "completed_at": run.completed_at,
+                "user_name": owner.name or "未知学生",
+                "username": owner.username or "",
+                "class_group": owner.class_group or "",
+                "tasks": [
+                    {
+                        "task_id": s.task.id,
+                        "title": s.task.title,
+                        "sequence_no": s.sequence_no,
+                    }
+                    for s in sorted(run.sessions, key=lambda x: x.sequence_no)
+                    if s.task
+                ] if run.sessions else [],
+                "completed_at": run.completed_at or run.created_at,
             }
             for run, owner in runs
             if run.id not in analyzed_run_ids
             and quality_allows_analysis(quality_by_run[run.id])
-        ][:20],
+        ][:50],
         "recent_reports": recent_reports,
     }
 
@@ -3469,26 +3516,27 @@ async def download_export(
 @router.get("/macro-analytics")
 async def get_macro_analytics(
     class_group: str = Query(default="all"),
-    user: User = Depends(require_role("teacher", "admin")),
+    participant_id: str | None = Query(default=None),
+    user: User = Depends(require_role("student", "teacher", "admin")),
     db: AsyncSession = Depends(get_db),
 ):
     """Aggregate only observable research records; never substitute demo values."""
     started = time.perf_counter()
-    dimensions = (
-        ("monitoring", "监控 (Monitoring)"),
-        ("controlDebugging", "调控 (Regulation)"),
-        ("evaluation", "评估 (Evaluation)"),
+    dimensions = METACOGNITION_DIMENSIONS
+    target_user: User | None = user if user.role == "student" else None
+    if user.role != "student" and participant_id:
+        target_user = await db.get(User, participant_id)
+        if (
+            target_user is None
+            or target_user.role != "student"
+            or not can_access_user(user, target_user)
+        ):
+            raise HTTPException(status_code=403, detail="无权查看该学生的个人三分类数据")
+    selected_class_group = (
+        target_user.class_group
+        if target_user is not None and target_user.class_group
+        else class_group.strip() or "all"
     )
-    def normalize_dimension(value: object) -> str | None:
-        normalized = str(value or "").strip().lower().replace("-", "_")
-        return {
-            "monitoring": "monitoring",
-            "regulation": "controlDebugging",
-            "control_regulation": "controlDebugging",
-            "controldebugging": "controlDebugging",
-            "control_debugging": "controlDebugging",
-            "evaluation": "evaluation",
-        }.get(normalized)
 
     profile_rows = (await db.execute(
         select(MetacognitiveProfile, User, AssessmentRun)
@@ -3503,7 +3551,13 @@ async def get_macro_analytics(
     ]
     selected_profiles = [
         row for row in visible_profiles
-        if class_group == "all" or row[1].class_group == class_group
+        if (
+            (target_user is not None and row[1].id == target_user.id)
+            or (
+                target_user is None
+                and (selected_class_group == "all" or row[1].class_group == selected_class_group)
+            )
+        )
     ]
 
     def profile_scores(profile: MetacognitiveProfile) -> dict[str, float] | None:
@@ -3542,17 +3596,41 @@ async def get_macro_analytics(
             for dimension, label in dimensions
         ]
 
-    run_rows = (await db.execute(
+    all_run_rows = (await db.execute(
         select(AssessmentRun, User, MetacognitiveProfile)
         .join(User, User.id == AssessmentRun.user_id)
         .outerjoin(MetacognitiveProfile, MetacognitiveProfile.run_id == AssessmentRun.id)
-        .where(AssessmentRun.status == "completed")
+        .where(AssessmentRun.status == "completed", User.role == "student")
     )).all()
+    visible_run_rows = [
+        row for row in all_run_rows if can_access_user(user, row[1])
+    ]
+    available_class_groups = sorted({
+        owner.class_group
+        for _run, owner, _profile in visible_run_rows
+        if owner.class_group
+    })
+    if (
+        user.role != "student"
+        and target_user is None
+        and selected_class_group != "all"
+        and selected_class_group not in available_class_groups
+    ):
+        raise HTTPException(status_code=403, detail="无权查看该班级的数据")
+
     selected_runs = [
         (run, owner, profile)
-        for run, owner, profile in run_rows
-        if can_access_user(user, owner)
-        and (class_group == "all" or owner.class_group == class_group)
+        for run, owner, profile in visible_run_rows
+        if (
+            (target_user is not None and owner.id == target_user.id)
+            or (
+                target_user is None
+                and (
+                    selected_class_group == "all"
+                    or owner.class_group == selected_class_group
+                )
+            )
+        )
     ]
     run_ids = [run.id for run, _owner, _profile in selected_runs]
     session_ids = list((await db.scalars(
@@ -3620,42 +3698,137 @@ async def get_macro_analytics(
                 ),
             }
 
-    expert_counts = {"monitoring": 0, "controlDebugging": 0, "evaluation": 0}
-    if session_ids:
-        expert_rows = (await db.execute(
-            select(CodingUnit.final_dimension, func.count(CodingUnit.id))
+    global_run_ids = [run.id for run, _owner, _profile in all_run_rows]
+    latest_batch_by_run: dict[str, CodingBatch] = {}
+    if global_run_ids:
+        coding_batch_rows = (await db.execute(
+            select(CodingBatch, CodingUnit.run_id)
+            .join(CodingUnit, CodingUnit.batch_id == CodingBatch.id)
             .where(
-                CodingUnit.session_id.in_(session_ids),
-                CodingUnit.status.in_(("agreed", "adjudicated")),
-                CodingUnit.final_dimension.is_not(None),
+                CodingUnit.run_id.in_(global_run_ids),
+                CodingBatch.status == "completed",
             )
-            .group_by(CodingUnit.final_dimension)
-        )).all()
-        for raw_dimension, count in expert_rows:
-            mapped = normalize_dimension(raw_dimension)
-            if mapped in expert_counts:
-                expert_counts[mapped] += int(count)
-
-    model_counts = {"monitoring": 0, "controlDebugging": 0, "evaluation": 0}
-    if run_ids:
-        model_rows = (await db.execute(
-            select(ExtractionCandidate.predicted_dimension, func.count(ExtractionCandidate.id))
-            .where(
-                ExtractionCandidate.run_id.in_(run_ids),
-                ExtractionCandidate.review_status.in_(("accepted", "pending")),
-                ExtractionCandidate.classification_status.in_(("classified", "classified_with_fallback")),
-                ExtractionCandidate.predicted_dimension.is_not(None),
+            .distinct()
+            .order_by(
+                CodingUnit.run_id.asc(),
+                CodingBatch.completed_at.desc(),
+                CodingBatch.created_at.desc(),
+                CodingBatch.id.desc(),
             )
-            .group_by(ExtractionCandidate.predicted_dimension)
         )).all()
-        for raw_dimension, count in model_rows:
-            mapped = normalize_dimension(raw_dimension)
-            if mapped in model_counts:
-                model_counts[mapped] += int(count)
+        for batch, batch_run_id in coding_batch_rows:
+            if batch_run_id and batch_run_id not in latest_batch_by_run:
+                latest_batch_by_run[batch_run_id] = batch
+    latest_batch_ids = [batch.id for batch in latest_batch_by_run.values()]
+    expert_rows = (await db.execute(
+        select(CodingUnit.run_id, CodingUnit.final_dimension, func.count(CodingUnit.id))
+        .where(
+            CodingUnit.batch_id.in_(latest_batch_ids),
+            CodingUnit.status.in_(("agreed", "adjudicated")),
+            CodingUnit.final_dimension.is_not(None),
+        )
+        .group_by(CodingUnit.run_id, CodingUnit.final_dimension)
+    )).all() if latest_batch_ids else []
 
-    primary_counts = expert_counts if sum(expert_counts.values()) else model_counts
-    primary_source = "expert_consensus" if sum(expert_counts.values()) else (
-        "production_model" if sum(model_counts.values()) else "none"
+    global_session_ids = list((await db.scalars(
+        select(AssessmentSession.id).where(AssessmentSession.run_id.in_(global_run_ids))
+    )).all()) if global_run_ids else []
+    latest_extraction_by_session: dict[str, ExtractionJob] = {}
+    if global_session_ids:
+        extraction_jobs = list((await db.scalars(
+            select(ExtractionJob)
+            .join(
+                ExtractionCandidate,
+                ExtractionCandidate.extraction_job_id == ExtractionJob.id,
+            )
+            .where(ExtractionJob.session_id.in_(global_session_ids))
+            .distinct()
+        )).all())
+        for extraction_job in extraction_jobs:
+            current = latest_extraction_by_session.get(extraction_job.session_id)
+            job_key = (
+                extraction_job.generation_no or 0,
+                extraction_job.created_at or datetime.min,
+                extraction_job.id,
+            )
+            current_key = (
+                current.generation_no or 0,
+                current.created_at or datetime.min,
+                current.id,
+            ) if current else (-1, datetime.min, "")
+            if job_key > current_key:
+                latest_extraction_by_session[extraction_job.session_id] = extraction_job
+    latest_extraction_job_ids = [job.id for job in latest_extraction_by_session.values()]
+    model_rows = (await db.execute(
+        select(
+            ExtractionCandidate.run_id,
+            ExtractionCandidate.predicted_dimension,
+            func.count(ExtractionCandidate.id),
+        )
+        .where(
+            ExtractionCandidate.extraction_job_id.in_(latest_extraction_job_ids),
+            ExtractionCandidate.review_status.in_(("accepted", "pending")),
+            ExtractionCandidate.classification_status.in_(("classified", "classified_with_fallback")),
+            ExtractionCandidate.predicted_dimension.is_not(None),
+        )
+        .group_by(ExtractionCandidate.run_id, ExtractionCandidate.predicted_dimension)
+    )).all() if latest_extraction_job_ids else []
+    resolved_by_run = resolve_run_distributions(expert_rows, model_rows)
+
+    personal_run_ids = [
+        run.id for run, owner, _profile in all_run_rows
+        if target_user is not None and owner.id == target_user.id
+    ]
+    class_run_ids = [
+        run.id for run, owner, _profile in all_run_rows
+        if selected_class_group != "all" and owner.class_group == selected_class_group
+    ]
+    visible_selected_run_ids = [run.id for run, _owner, _profile in selected_runs]
+    personal_distribution = (
+        aggregate_distribution(
+            personal_run_ids,
+            resolved_by_run,
+            scope="participant",
+            label=target_user.name,
+        )
+        if target_user is not None else None
+    )
+    class_distribution = (
+        aggregate_distribution(
+            class_run_ids,
+            resolved_by_run,
+            scope="class",
+            label=selected_class_group,
+        )
+        if selected_class_group != "all" else None
+    )
+    overall_distribution = aggregate_distribution(
+        global_run_ids,
+        resolved_by_run,
+        scope="overall",
+        label="全体样本",
+    )
+    selected_distribution = (
+        personal_distribution
+        or class_distribution
+        or aggregate_distribution(
+            visible_selected_run_ids,
+            resolved_by_run,
+            scope="accessible",
+            label="全部可访问样本",
+        )
+    )
+    primary_counts = selected_distribution["counts"]
+    primary_source = selected_distribution["primary_source"]
+    expert_consensus_total = sum(
+        sum(row["counts"].values())
+        for run_id, row in resolved_by_run.items()
+        if run_id in set(visible_selected_run_ids) and row["source"] == "expert_consensus"
+    )
+    production_model_total = sum(
+        sum(row["counts"].values())
+        for run_id, row in resolved_by_run.items()
+        if run_id in set(visible_selected_run_ids) and row["source"] == "production_model"
     )
 
     asr_statuses = dict((await db.execute(
@@ -3673,7 +3846,11 @@ async def get_macro_analytics(
         round(int(asr_statuses.get("completed", 0)) / terminal_asr * 100, 1)
         if terminal_asr else None
     )
-    candidate_total = sum(model_counts.values())
+    selected_run_id_set = set(run_ids)
+    candidate_total = sum(
+        int(count) for candidate_run_id, _dimension, count in model_rows
+        if candidate_run_id in selected_run_id_set
+    )
     eligible_candidate_count = int(await db.scalar(
         select(func.count(ExtractionCandidate.id)).where(
             ExtractionCandidate.run_id.in_(run_ids),
@@ -3682,17 +3859,40 @@ async def get_macro_analytics(
     ) or 0) if run_ids else 0
 
     response = {
-        "class_name": class_group,
+        "class_name": selected_class_group,
+        "selected_participant_id": target_user.id if target_user is not None else None,
+        "available_participants": (
+            [] if user.role == "student" else sorted([
+                {
+                    "id": owner.id,
+                    "name": owner.name,
+                    "username": owner.username,
+                    "class_group": owner.class_group,
+                }
+                for owner in {row[1].id: row[1] for row in visible_run_rows}.values()
+                if (
+                    selected_class_group == "all"
+                    or owner.class_group == selected_class_group
+                )
+            ], key=lambda item: (str(item["class_group"] or ""), item["name"], item["username"]))
+        ),
         "generated_at": utc_isoformat(utc_now_naive()),
-        "available_class_groups": sorted({
-            owner.class_group for _run, owner, _profile in run_rows
-            if owner.class_group and can_access_user(user, owner)
-        }),
+        "available_class_groups": available_class_groups,
         "sample_count": len(selected_score_rows),
         "reference_sample_count": len(reference_score_rows),
         "class_averages": averages(selected_score_rows),
         "reference_averages": averages(reference_score_rows),
-        "profile_source": "已完成测评生成的元认知画像；参照组为当前账号有权访问的全部画像，不是外部常模。",
+        "profile_source": (
+            "雷达图按监控、调控、评估三类证据占三类总数的百分比计算。"
+            "每次测评优先采用最新已完成盲编批次的专家共识/仲裁结果；该次测评没有专家结果时，使用最新抽取版本的生产模型分类。"
+            "班级与全体仅返回汇总，不向学生披露他人明细。"
+        ),
+        "radar_profiles": {
+            "selected": selected_distribution,
+            "participant": personal_distribution,
+            "class_group": class_distribution,
+            "overall": overall_distribution,
+        },
         "order_balance": {
             "groupAB": {
                 "name": "任务 AB 组 (先A后B)",
@@ -3716,8 +3916,8 @@ async def get_macro_analytics(
             "primary_source": primary_source,
             "counts": primary_counts,
             "total": sum(primary_counts.values()),
-            "expert_consensus_total": sum(expert_counts.values()),
-            "production_model_total": sum(model_counts.values()),
+            "expert_consensus_total": expert_consensus_total,
+            "production_model_total": production_model_total,
         },
         "pipeline_status": {
             "database": "available",

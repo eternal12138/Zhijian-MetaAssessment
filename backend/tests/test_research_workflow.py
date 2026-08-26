@@ -26,9 +26,9 @@ from app.services.method_templates import DEFAULT_TEMPLATES
 
 class ResearchWorkflowTest(unittest.TestCase):
     def test_default_templates_are_replaceable_and_well_formed(self):
-        self.assertIn("{segments}", DEFAULT_TEMPLATES["coding_prompt"]["content"])
-        json.loads(DEFAULT_TEMPLATES["scoring_standard"]["content"])
-        json.loads(DEFAULT_TEMPLATES["intervention_templates"]["content"])
+        self.assertIn("{overall_score}", DEFAULT_TEMPLATES["report_prompt"]["content"])
+        self.assertIn("{dimension_results}", DEFAULT_TEMPLATES["report_prompt"]["content"])
+        self.assertIn("{segments}", DEFAULT_TEMPLATES["metacognitive_extractor"]["content"])
 
     def test_annotation_rejects_unknown_dimension_and_invalid_score(self):
         with self.assertRaises(ValidationError):

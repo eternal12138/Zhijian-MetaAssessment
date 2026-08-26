@@ -277,7 +277,13 @@ class ModelTrainingLifecycleTests(unittest.TestCase):
         self.assertEqual(len(metrics["confusion_matrix"]), 3)
         self.assertEqual(set(metrics["per_class"]), {"1", "2", "3"})
         self.assertIn("macro_specificity", metrics)
+        self.assertIn("weighted_precision", metrics)
+        self.assertIn("weighted_recall", metrics)
+        self.assertEqual(len(metrics["_oof_predictions"]), len(samples))
         self.assertTrue(all("specificity" in item for item in metrics["per_class"].values()))
+        self.assertTrue(all(fold["subject_disjoint_verified"] for fold in metrics["folds"]))
+        self.assertTrue(all(isinstance(fold.get("macro_auc_ovr"), float) and 0.0 <= fold["macro_auc_ovr"] <= 1.0 for fold in metrics["folds"]))
+        self.assertTrue(all(set(fold.get("per_class_auc", {}).keys()) == {"1", "2", "3"} for fold in metrics["folds"]))
         self.assertEqual(set(metrics["roc_curves"]), {"macro", "1", "2", "3"})
         self.assertIn("macro_auc_ovr", metrics)
         self.assertNotIn("cross_entropy", metrics)
@@ -351,6 +357,7 @@ class ModelTrainingLifecycleTests(unittest.TestCase):
                     "decision_function" if classifier_type == "linear_svc" else "predict_proba",
                 )
                 self.assertTrue(all("train_macro_f1" in fold for fold in metrics["folds"]))
+                self.assertTrue(all(isinstance(fold.get("macro_auc_ovr"), float) and 0.0 <= fold["macro_auc_ovr"] <= 1.0 for fold in metrics["folds"]))
                 self.assertEqual(len(classifier.predict(features[:1])), 1)
                 if classifier_type == "linear_svc":
                     self.assertNotIn("cross_entropy", metrics)

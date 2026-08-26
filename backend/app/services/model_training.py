@@ -525,6 +525,8 @@ def _train(features: np.ndarray, labels: np.ndarray, groups: np.ndarray):
             "macro_f1": float(f1_score(labels[test_idx], predictions[test_idx], average="macro", zero_division=0)),
             "macro_precision": float(precision_score(labels[test_idx], predictions[test_idx], average="macro", zero_division=0)),
             "macro_recall": float(recall_score(labels[test_idx], predictions[test_idx], average="macro", zero_division=0)),
+            "weighted_precision": float(precision_score(labels[test_idx], predictions[test_idx], average="weighted", zero_division=0)),
+            "weighted_recall": float(recall_score(labels[test_idx], predictions[test_idx], average="weighted", zero_division=0)),
             "accuracy": float(accuracy_score(labels[test_idx], predictions[test_idx])),
         })
     binary = label_binarize(labels, classes=list(TRAINING_LABELS))
@@ -535,6 +537,8 @@ def _train(features: np.ndarray, labels: np.ndarray, groups: np.ndarray):
         "accuracy": float(accuracy_score(labels, predictions)),
         "macro_precision": float(precision_score(labels, predictions, average="macro", zero_division=0)),
         "macro_recall": float(recall_score(labels, predictions, average="macro", zero_division=0)),
+        "weighted_precision": float(precision_score(labels, predictions, average="weighted", zero_division=0)),
+        "weighted_recall": float(recall_score(labels, predictions, average="weighted", zero_division=0)),
         "macro_f1": float(f1_score(labels, predictions, average="macro", zero_division=0)),
         "cross_entropy": float(log_loss(labels, probabilities, labels=list(TRAINING_LABELS))),
         "macro_auc_ovr": float(roc_auc_score(binary, probabilities, average="macro", multi_class="ovr")),
@@ -574,6 +578,8 @@ def _classification_metrics(
         "accuracy": float(accuracy_score(labels, predictions)),
         "macro_precision": float(precision_score(labels, predictions, average="macro", zero_division=0)),
         "macro_recall": float(recall_score(labels, predictions, average="macro", zero_division=0)),
+        "weighted_precision": float(precision_score(labels, predictions, average="weighted", zero_division=0)),
+        "weighted_recall": float(recall_score(labels, predictions, average="weighted", zero_division=0)),
         "macro_f1": float(f1_score(labels, predictions, average="macro", zero_division=0)),
         "weighted_f1": float(f1_score(labels, predictions, average="weighted", zero_division=0)),
         "macro_specificity": float(np.mean(per_specificity)),
@@ -731,6 +737,35 @@ async def process_training_job(job_id: str) -> None:
             "final_model_refit_on_all_data": True,
             "external_holdout": False,
         }
+        oof_predictions = metrics.pop("_oof_predictions", None)
+        if isinstance(oof_predictions, list) and len(oof_predictions) == len(samples):
+            error_rows = []
+            for (participant_id, text, true_label), predicted_label in zip(
+                samples, oof_predictions, strict=True,
+            ):
+                if int(true_label) == int(predicted_label):
+                    continue
+                error_rows.append({
+                    "participant_id": str(participant_id) or None,
+                    "text": str(text),
+                    "true_label": int(true_label),
+                    "predicted_label": int(predicted_label),
+                })
+            metrics["error_analysis"] = {
+                "total_error_count": len(error_rows),
+                "displayed_error_count": len(error_rows),
+                "cases": error_rows,
+                "metadata_availability": {
+                    "participant_id": has_participant_ids,
+                    "task_id": False,
+                    "audio_id": False,
+                    "segment_id": False,
+                },
+                "note": (
+                    "当前冻结训练快照仅含被试标识、清洗后文本和专家标签；"
+                    "任务、音频及片段字段未进入该训练版本，无法按任务或音频回听分析。"
+                ),
+            }
         metrics["classifier_parameters"] = classifier_parameters
         metrics["hyperparameters_tuned"] = bool(snapshot.get("hyperparameters_tuned"))
         metrics["hyperparameter_source"] = str(snapshot.get("hyperparameter_source") or "default")

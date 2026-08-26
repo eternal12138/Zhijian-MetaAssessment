@@ -12,7 +12,8 @@ import hashlib
 import json
 from datetime import datetime
 from pathlib import Path
-from statistics import fmean, pstdev
+from math import sqrt
+from statistics import fmean, pstdev, stdev
 from typing import Any, Iterable
 
 from app.models.research import ModelTrainingJob
@@ -21,8 +22,28 @@ from app.training.baseline_models import TRAINING_LABEL_NAMES
 
 CORE_METRICS = (
     "accuracy", "macro_precision", "macro_recall", "macro_specificity",
-    "macro_f1", "weighted_f1", "macro_auc_ovr", "cross_entropy",
+    "weighted_precision", "weighted_recall", "macro_f1", "weighted_f1",
+    "macro_auc_ovr", "cross_entropy",
 )
+
+
+def _fold_interval(values: list[float]) -> dict[str, Any]:
+    """Return a transparent 95% t interval over fold-level measurements."""
+    if not values:
+        return {"mean": None, "std": None, "ci95_low": None, "ci95_high": None, "n": 0}
+    mean = fmean(values)
+    deviation = stdev(values) if len(values) > 1 else 0.0
+    # Two-sided t(0.975, df) critical values for the only fold counts used here.
+    critical = {1: 12.706, 2: 4.303, 3: 3.182, 4: 2.776}.get(len(values) - 1, 1.96)
+    margin = critical * deviation / sqrt(len(values)) if len(values) > 1 else 0.0
+    return {
+        "mean": mean,
+        "std": deviation,
+        "ci95_low": max(0.0, mean - margin),
+        "ci95_high": min(1.0, mean + margin),
+        "n": len(values),
+        "method": "two_sided_t_interval_over_folds",
+    }
 
 
 def _sha256(path: Path) -> str:
@@ -275,6 +296,29 @@ def load_job_evaluation(job: ModelTrainingJob, model_root: Path) -> dict[str, An
     ]
     fold_mean = fmean(fold_f1) if fold_f1 else None
     train_fold_mean = fmean(train_fold_f1) if train_fold_f1 else None
+    fold_macro_auc = [
+        float(item["macro_auc_ovr"])
+        for item in folds
+        if isinstance(item.get("macro_auc_ovr"), (int, float))
+    ]
+    fold_auc_mean = fmean(fold_macro_auc) if fold_macro_auc else None
+    fold_auc_std = stdev(fold_macro_auc) if len(fold_macro_auc) > 1 else (0.0 if fold_macro_auc else None)
+    fold_auc_min = min(fold_macro_auc) if fold_macro_auc else None
+    fold_auc_max = max(fold_macro_auc) if fold_macro_auc else None
+    fold_auc_range = max(fold_macro_auc) - min(fold_macro_auc) if fold_macro_auc else None
+    per_class_auc_intervals = {}
+    for label in labels:
+        values = [
+            float((item.get("per_class_auc") or {}).get(str(label["id"])))
+            for item in folds
+            if isinstance((item.get("per_class_auc") or {}).get(str(label["id"])), (int, float))
+        ]
+        per_class_auc_intervals[str(label["id"])] = _fold_interval(values)
+    overlap_counts = [
+        int(item["participant_overlap_count"])
+        for item in folds
+        if isinstance(item.get("participant_overlap_count"), (int, float))
+    ]
     snapshot = dict(job.config_snapshot or {})
     return {
         "model_id": job.id,
@@ -293,10 +337,18 @@ def load_job_evaluation(job: ModelTrainingJob, model_root: Path) -> dict[str, An
         "cross_validation": {
             "fold_count": len(folds),
             "macro_f1_mean": fold_mean,
-            "macro_f1_std": pstdev(fold_f1) if len(fold_f1) > 1 else (0.0 if fold_f1 else None),
+            "macro_f1_std": stdev(fold_f1) if len(fold_f1) > 1 else (0.0 if fold_f1 else None),
             "macro_f1_min": min(fold_f1) if fold_f1 else None,
             "macro_f1_max": max(fold_f1) if fold_f1 else None,
             "macro_f1_range": max(fold_f1) - min(fold_f1) if fold_f1 else None,
+            "macro_auc_mean": fold_auc_mean,
+            "macro_auc_std": fold_auc_std,
+            "macro_auc_min": fold_auc_min,
+            "macro_auc_max": fold_auc_max,
+            "macro_auc_range": fold_auc_range,
+            "macro_f1_interval": _fold_interval(fold_f1),
+            "macro_auc_interval": _fold_interval(fold_macro_auc),
+            "per_class_auc_intervals": per_class_auc_intervals,
             "train_macro_f1_mean": train_fold_mean,
             "train_test_macro_f1_gap": (
                 train_fold_mean - float(metrics["macro_f1"])
@@ -306,6 +358,19 @@ def load_job_evaluation(job: ModelTrainingJob, model_root: Path) -> dict[str, An
             "train_sample_counts": train_sample_counts,
             "test_sample_counts": test_sample_counts,
             "folds": folds,
+            "subject_disjoint_audit": {
+                "available": len(overlap_counts) == len(folds) and bool(folds),
+                "all_folds_verified": (
+                    len(overlap_counts) == len(folds) and bool(folds)
+                    and all(value == 0 for value in overlap_counts)
+                ),
+                "maximum_overlap_count": max(overlap_counts) if overlap_counts else None,
+                "note": (
+                    "每折训练被试与测试被试交集均为 0。"
+                    if len(overlap_counts) == len(folds) and folds and all(value == 0 for value in overlap_counts)
+                    else "该训练版本没有完整的折级被试交集证据。"
+                ),
+            },
         },
         "dataset": {
             "version": manifest.get("dataset_version"),
@@ -333,6 +398,24 @@ def load_job_evaluation(job: ModelTrainingJob, model_root: Path) -> dict[str, An
         "roc_evaluation": metrics.get("roc_evaluation"),
         "subject_leakage_risk": metrics.get("subject_leakage_risk"),
         "evaluation_warning": metrics.get("evaluation_warning"),
+        "error_analysis": metrics.get("error_analysis"),
+        "evidence_coverage": {
+            "subject_level_split": len(overlap_counts) == len(folds) and bool(folds),
+            "fold_uncertainty": bool(fold_f1),
+            "independent_external_holdout": bool(
+                metrics.get("evaluation_summary", {}).get("external_holdout", False)
+            ),
+            "pairwise_statistical_test": bool(metrics.get("pairwise_statistical_test")),
+            "cross_task_transfer": bool(metrics.get("cross_task_transfer")),
+            "expert_reliability_bound_to_dataset": bool(metrics.get("expert_reliability")),
+            "asr_quality_bound_to_dataset": bool(metrics.get("asr_quality")),
+            "notes": {
+                "pairwise_statistical_test": "当前训练产物未保存可用于配对显著性检验的完整折外分数矩阵。",
+                "cross_task_transfer": "当前冻结训练快照没有 task_id，不能生成跨任务迁移结果。",
+                "expert_reliability_bound_to_dataset": "系统已有全局 Cohen κ 统计，但尚未与本次冻结训练数据版本绑定。",
+                "asr_quality_bound_to_dataset": "当前训练快照只含清洗后文本和标签，未绑定 ASR 原文或音频质量指标。",
+            },
+        },
         "source": {
             "type": "training_evaluation_result",
             "manifest_schema_version": manifest.get("schema_version"),

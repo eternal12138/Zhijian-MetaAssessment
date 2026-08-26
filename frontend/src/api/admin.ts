@@ -130,6 +130,8 @@ export interface ModelConfigHistory {
 
 export interface ProtocolConfig {
   questionnaire_enabled: boolean
+  behavior_weight: number
+  questionnaire_weight: number
   updated_at: string | null
 }
 
@@ -328,32 +330,11 @@ export const adminApi = {
     return apiClient.delete(`/admin/users/${userId}`)
   },
 
-  /** 清空用户的对话历史（按任务，taskId 可选） */
-  clearUserHistory(userId: string, taskId?: string) {
-    const params = taskId ? `?task_id=${encodeURIComponent(taskId)}` : ''
-    return apiClient.delete(`/admin/users/${userId}/history${params}`)
-  },
-
-  /** 获取用户各任务的会话统计 */
-  getUserSessions(userId: string) {
-    return apiClient.get<Array<{ task_id: string; task_title: string; dialogue_count: number }>>(`/admin/users/${userId}/sessions`)
-  },
-
   /** 获取用户特定任务的对话记录 */
   getUserDialogue(userId: string, taskId: string) {
     return apiClient.get<Array<{ id: string; role: string; content: string; timestamp: number }>>(
       `/admin/users/${userId}/dialogue?task_id=${encodeURIComponent(taskId)}`
     )
-  },
-
-  /** 获取系统提示词 */
-  getPrompt() {
-    return apiClient.get<{ content: string; updated_at: string | null }>('/admin/prompt')
-  },
-
-  /** 更新系统提示词 */
-  updatePrompt(content: string) {
-    return apiClient.put('/admin/prompt', { content })
   },
 
   /** 按账号和测评时间列出可治理的研究数据。 */
@@ -411,11 +392,13 @@ export const adminApi = {
     return apiClient.get<ProtocolConfig>('/admin/protocol-config')
   },
 
-  /** 保存协议开关；进行中的测评继续使用创建时的快照 */
-  updateProtocolConfig(questionnaireEnabled: boolean) {
-    return apiClient.put<ProtocolConfig>('/admin/protocol-config', {
-      questionnaire_enabled: questionnaireEnabled
-    })
+  /** 保存协议开关与多模态加权权重；进行中的测评继续使用创建时的快照 */
+  updateProtocolConfig(data: {
+    questionnaire_enabled: boolean
+    behavior_weight?: number
+    questionnaire_weight?: number
+  }) {
+    return apiClient.put<ProtocolConfig>('/admin/protocol-config', data)
   },
 
   /** 列出标准测评的真人朗读录音槽位 */

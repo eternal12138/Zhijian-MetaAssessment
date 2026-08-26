@@ -1,7 +1,7 @@
 """Complete assessment reports, evidence coding, and human review."""
 import json
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -23,6 +23,11 @@ from app.services.report_analyzer import generate_run_report
 from app.services.notifications import create_notification, notify_reviewers
 
 router = APIRouter(prefix="/reports", tags=["报告"])
+
+LEGACY_REVIEW_DETAIL = {
+    "code": "LEGACY_REVIEW_WORKFLOW_RETIRED",
+    "message": "旧版单人编码复核流程已停用，请使用双人盲编与仲裁工作流",
+}
 
 
 async def _ensure_run_access(
@@ -180,6 +185,7 @@ async def list_pending_codings(
     db: AsyncSession = Depends(get_db),
 ):
     """教师或管理员查看低置信度、尚未人工确认的编码片段。"""
+    raise HTTPException(status_code=status.HTTP_410_GONE, detail=LEGACY_REVIEW_DETAIL)
     if user.role not in {"teacher", "admin"}:
         raise HTTPException(status_code=403, detail="仅教师或管理员可进行人工复核")
     statement = (
@@ -205,6 +211,7 @@ async def review_coding(
     db: AsyncSession = Depends(get_db),
 ):
     """保存人工评分；人工分数在报告聚合时优先于 AI 分数。"""
+    raise HTTPException(status_code=status.HTTP_410_GONE, detail=LEGACY_REVIEW_DETAIL)
     if user.role not in {"teacher", "admin"}:
         raise HTTPException(status_code=403, detail="仅教师或管理员可进行人工复核")
     result = await db.execute(

@@ -18,6 +18,8 @@ def metrics_payload(macro_f1: float = 0.62) -> dict:
         "accuracy": 0.64,
         "macro_precision": 0.63,
         "macro_recall": 0.61,
+        "weighted_precision": 0.64,
+        "weighted_recall": 0.64,
         "macro_specificity": 0.80,
         "macro_f1": macro_f1,
         "weighted_f1": 0.65,
@@ -31,7 +33,10 @@ def metrics_payload(macro_f1: float = 0.62) -> dict:
         "confusion_matrix": [[7, 2, 1], [2, 6, 2], [2, 3, 5]],
         "folds": [
             {"fold": index, "train_sample_count": 24, "sample_count": 6,
-             "train_macro_f1": 0.70 + index / 100, "macro_f1": 0.58 + index / 100}
+             "train_macro_f1": 0.70 + index / 100, "macro_f1": 0.58 + index / 100,
+             "macro_auc_ovr": 0.68 + index / 100,
+             "per_class_auc": {"1": 0.70 + index / 100, "2": 0.68 + index / 100, "3": 0.66 + index / 100},
+             "participant_overlap_count": 0, "subject_disjoint_verified": True}
             for index in range(1, 6)
         ],
         "evaluation_summary": {
@@ -88,9 +93,23 @@ class ModelMetricsServiceTests(unittest.TestCase):
             result = load_job_evaluation(job, root)
             self.assertEqual([item["id"] for item in result["labels"]], [1, 2, 3])
             self.assertEqual(result["summary"]["accuracy"], job.metrics["accuracy"])
+            self.assertEqual(result["summary"]["macro_auc_ovr"], 0.71)
             self.assertEqual(result["confusion_matrix"], job.metrics["confusion_matrix"])
             self.assertEqual(result["cross_validation"]["train_sample_counts"], [24] * 5)
             self.assertAlmostEqual(result["cross_validation"]["macro_f1_range"], 0.04)
+            # F1 values: [0.59, 0.60, 0.61, 0.62, 0.63], mean = 0.61, sample std = sqrt(0.0025/4) = sqrt(0.000625) = 0.0158113883
+            self.assertAlmostEqual(result["cross_validation"]["macro_f1_mean"], 0.61)
+            self.assertAlmostEqual(result["cross_validation"]["macro_f1_std"], 0.015811388300841896)
+            # Fold AUC values: [0.69, 0.70, 0.71, 0.72, 0.73]
+            self.assertAlmostEqual(result["cross_validation"]["macro_auc_mean"], 0.71)
+            self.assertAlmostEqual(result["cross_validation"]["macro_auc_std"], 0.015811388300841896)
+            self.assertAlmostEqual(result["cross_validation"]["macro_auc_min"], 0.69)
+            self.assertAlmostEqual(result["cross_validation"]["macro_auc_max"], 0.73)
+            self.assertAlmostEqual(result["cross_validation"]["macro_auc_range"], 0.04)
+            self.assertEqual(result["summary"]["weighted_precision"], 0.64)
+            self.assertTrue(result["cross_validation"]["subject_disjoint_audit"]["all_folds_verified"])
+            self.assertEqual(result["cross_validation"]["macro_auc_interval"]["n"], 5)
+            self.assertEqual(result["cross_validation"]["per_class_auc_intervals"]["1"]["n"], 5)
 
     def test_modified_metrics_file_is_rejected_instead_of_displayed(self):
         with TemporaryDirectory() as temporary:

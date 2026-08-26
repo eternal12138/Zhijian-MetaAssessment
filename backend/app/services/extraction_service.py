@@ -39,7 +39,12 @@ async def _notify_extraction_terminal(
     succeeded: bool,
     candidate_count: int = 0,
 ) -> None:
-    if not job.requested_by:
+    notify_user_id = job.requested_by
+    if not notify_user_id:
+        session = await db.get(AssessmentSession, job.session_id)
+        if session:
+            notify_user_id = session.user_id
+    if not notify_user_id:
         return
     target_url = (
         f"/candidate-review?session_id={job.session_id}&job_id={job.id}"
@@ -49,7 +54,7 @@ async def _notify_extraction_terminal(
         try:
             if succeeded:
                 await create_notification(
-                    db, user_id=job.requested_by, type="review",
+                    db, user_id=notify_user_id, type="review",
                     title=f"抽取版本 V{job.generation_no} 已生成",
                     content=f"AI 候选抽取已完成，共生成 {candidate_count} 条候选，等待人工复核。",
                     target_url=target_url, event_key=f"extraction:{job.id}:completed",
@@ -61,7 +66,7 @@ async def _notify_extraction_terminal(
                 )
             else:
                 await create_notification(
-                    db, user_id=job.requested_by, type="review",
+                    db, user_id=notify_user_id, type="review",
                     title=f"抽取版本 V{job.generation_no} 生成失败",
                     content=job.error_message or "AI 候选抽取未能完成，请检查模型服务后重新运行。",
                     target_url=target_url, event_key=f"extraction:{job.id}:failed",

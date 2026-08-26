@@ -18,6 +18,7 @@ from app.services.questionnaire import CURRENT_QUESTIONNAIRE_SOURCE
 from app.models.session import AssessmentSession, CodedSegment, TranscriptSegment
 from app.services.analysis_agent import AnalysisSegment, analysis_agent
 from app.services.method_templates import get_json_template, get_template
+from app.services.protocol_config import load_protocol_config
 from app.services.runtime_model_config import load_runtime_model_settings
 
 settings = get_settings()
@@ -345,6 +346,14 @@ async def generate_run_report(
         consensus_units = list(consensus_result.scalars().all())
         analysis_method = "double_coder_consensus"
     behavioral: dict[str, list[float]] = {dimension: [] for dimension in DIMENSIONS}
+    protocol_config = await load_protocol_config(db)
+    behavior_weight = protocol_config.behavior_weight
+    questionnaire_weight = protocol_config.questionnaire_weight
+    weight_total = behavior_weight + questionnaire_weight
+    if weight_total <= 0:
+        behavior_weight, questionnaire_weight, weight_total = 0.6, 0.4, 1.0
+    valid_transcript_count = len(_authoritative_transcripts(run))
+
     consensus_dimension_map = {
         "MONITORING": "monitoring",
         "monitoring": "monitoring",
@@ -364,20 +373,6 @@ async def generate_run_report(
     else:
         for code in codes:
             behavioral[code.dimension].append(float(code.human_score or code.score))
-
-    scoring_standard, scoring_version = await get_json_template(db, "scoring_standard")
-    def safe_float(value, default: float) -> float:
-        try:
-            return float(default if value is None or value == "" else value)
-        except (TypeError, ValueError):
-            return default
-
-    behavior_weight = safe_float(scoring_standard.get("behavior_weight"), 0.6)
-    questionnaire_weight = safe_float(scoring_standard.get("questionnaire_weight"), 0.4)
-    weight_total = behavior_weight + questionnaire_weight
-    if weight_total <= 0:
-        behavior_weight, questionnaire_weight, weight_total = 0.6, 0.4, 1.0
-    valid_transcript_count = len(_authoritative_transcripts(run))
 
     details: list[dict] = []
     for dimension in DIMENSIONS:
@@ -428,22 +423,20 @@ async def generate_run_report(
                         "reason": (
                             "两名编码员独立编码一致"
                             if unit.final_source == "double_coder_consensus"
-                            else "经指定第三方仲裁确认"
+                            else "人工仲裁终审确定"
                         ),
-                        "confidence": 1.0,
-                        "needsReview": False,
+                        "score": 6,
                     }
                     for unit in evidence_units
                 ]
-                if consensus_units
+                if evidence_units
                 else [
                     {
-                        "segmentId": code.id,
+                        "segmentId": code.transcript_segment_id or code.id,
                         "excerpt": code.segment[:180],
-                        "scaleItemId": code.scale_item_id or "",
-                        "reason": code.reason,
-                        "confidence": round(code.confidence, 2),
-                        "needsReview": code.needs_review,
+                        "scaleItemId": "",
+                        "reason": code.reason or f"AI 自动识别为{DIMENSION_LABELS[dimension]}特征言语",
+                        "score": code.score,
                     }
                     for code in evidence_codes
                 ]
@@ -451,18 +444,19 @@ async def generate_run_report(
         })
 
     overall = round(sum(item["score"] for item in details) / len(details), 1)
-    levels = sorted(
-        scoring_standard.get("levels", []),
-        key=lambda item: safe_float(item.get("min"), 0.0),
-        reverse=True,
-    )
-    level = next(
-        (str(item.get("label")) for item in levels if overall >= safe_float(item.get("min"), 0.0)),
+    LEVEL_THRESHOLDS = [
+        (85.0, "表现突出"),
+        (70.0, "表现较稳定"),
+        (55.0, "发展中"),
+        (0.0, "需要练习"),
+    ]
+    fallback_level = next(
+        (label for min_score, label in LEVEL_THRESHOLDS if overall >= min_score),
         "待解释",
     )
     ordered = sorted(details, key=lambda item: item["score"], reverse=True)
-    strengths = [item["label"] for item in ordered if item["score"] >= 70]
-    weaknesses = [item["label"] for item in reversed(ordered) if item["score"] < 55]
+    fallback_strengths = [item["label"] for item in ordered if item["score"] >= 70]
+    fallback_weaknesses = [item["label"] for item in reversed(ordered) if item["score"] < 55]
     review_count = (
         0
         if consensus_units
@@ -477,11 +471,32 @@ async def generate_run_report(
         if run.questionnaire_enabled
         else f"{behavioral_count} 条可观察编码证据（本次协议未启用任务后问卷）"
     )
-    summary = (
+    fallback_summary = (
         f"本报告依据两项任务中的 {evidence_source} 生成。"
-        f"当前综合表现为“{level}”。"
+        f"当前综合表现为“{fallback_level}”。"
         "结果用于学习反馈，不等同于临床诊断或经常模验证的心理测量结论。"
     )
+
+    # 调用火山方舟 LLM（依据三分类评估结果与证据生成综合元认知画像报告与干预策略）
+    report_prompt, report_prompt_version = await get_template(db, "report_prompt")
+    ai_profile = await analysis_agent.generate_metacognitive_profile(
+        overall_score=overall,
+        dimension_results=details,
+        prompt_template=report_prompt,
+    )
+
+    if ai_profile and isinstance(ai_profile, dict):
+        level = str(ai_profile.get("level") or fallback_level)
+        summary = str(ai_profile.get("summary") or fallback_summary)
+        strengths = ai_profile.get("strengths") if isinstance(ai_profile.get("strengths"), list) else fallback_strengths
+        weaknesses = ai_profile.get("weaknesses") if isinstance(ai_profile.get("weaknesses"), list) else fallback_weaknesses
+        ai_suggestions = ai_profile.get("suggestions") if isinstance(ai_profile.get("suggestions"), list) else []
+    else:
+        level = fallback_level
+        summary = fallback_summary
+        strengths = fallback_strengths
+        weaknesses = fallback_weaknesses
+        ai_suggestions = []
 
     profile_result = await db.execute(
         select(MetacognitiveProfile)
@@ -514,23 +529,35 @@ async def generate_run_report(
         if consensus_units or any(code.human_score is not None for code in codes)
         else "draft"
     )
-    profile.template_version = scoring_version
+    profile.template_version = f"v1:{report_prompt_version}"
     profile.generated_at = utc_now_naive()
 
-    intervention_templates, _ = await get_json_template(db, "intervention_templates")
-    for detail in sorted(details, key=lambda item: item["score"])[:2]:
-        configured = intervention_templates.get(detail["dimension"], {})
-        fallback_title, fallback_description, fallback_practices = SUGGESTIONS[detail["dimension"]]
-        title = str(configured.get("title", fallback_title))
-        description = str(configured.get("description", fallback_description))
-        practices = configured.get("practices", fallback_practices)
-        profile.suggestions.append(LearningSuggestion(
-            dimension=detail["dimension"],
-            title=title,
-            description=description,
-            practices=json.dumps(practices, ensure_ascii=False),
-            difficulty="medium",
-        ))
+    if ai_suggestions:
+        for s in ai_suggestions[:3]:
+            if not isinstance(s, dict):
+                continue
+            dim = s.get("dimension") if s.get("dimension") in DIMENSIONS else "monitoring"
+            title = str(s.get("title") or "元认知训练建议")
+            description = str(s.get("description") or "")
+            practices = s.get("practices") if isinstance(s.get("practices"), list) else []
+            profile.suggestions.append(LearningSuggestion(
+                dimension=dim,
+                title=title,
+                description=description,
+                practices=json.dumps(practices, ensure_ascii=False),
+                difficulty="medium",
+            ))
+
+    if not profile.suggestions:
+        for detail in sorted(details, key=lambda item: item["score"])[:2]:
+            fallback_title, fallback_description, fallback_practices = SUGGESTIONS[detail["dimension"]]
+            profile.suggestions.append(LearningSuggestion(
+                dimension=detail["dimension"],
+                title=fallback_title,
+                description=fallback_description,
+                practices=json.dumps(fallback_practices, ensure_ascii=False),
+                difficulty="medium",
+            ))
     await db.flush()
     await db.refresh(profile)
     return profile

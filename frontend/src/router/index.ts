@@ -86,7 +86,7 @@ const router = createRouter({
       path: '/teacher',
       name: 'TeacherCenter',
       component: () => import('../views/TeacherCenterView.vue'),
-      meta: { title: '教师中心', icon: 'bi-mortarboard-fill', description: '发布测评任务、跟进完成情况并查看班级聚合数据。', requiresAuth: true, allowedRoles: ['teacher', 'admin'] }
+      meta: { title: '教师中心', icon: 'bi-mortarboard-fill', description: '跟进固定协议测评、管理人工复核并查看班级聚合数据。', requiresAuth: true, allowedRoles: ['teacher', 'admin'] }
     },
     {
       path: '/review',

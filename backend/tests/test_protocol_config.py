@@ -11,10 +11,11 @@ class ProtocolConfigTests(unittest.TestCase):
         self.assertFalse(DEFAULT_QUESTIONNAIRE_ENABLED)
 
     def test_decode_requires_explicit_json_true(self):
-        self.assertTrue(_decode('{"questionnaire_enabled":true}'))
-        self.assertFalse(_decode('{"questionnaire_enabled":false}'))
-        self.assertFalse(_decode("{}"))
-        self.assertFalse(_decode("invalid"))
+        self.assertEqual(_decode('{"questionnaire_enabled":true}'), (True, 0.6, 0.4))
+        self.assertEqual(_decode('{"questionnaire_enabled":false}'), (False, 0.6, 0.4))
+        self.assertEqual(_decode('{"questionnaire_enabled":true,"behavior_weight":0.7,"questionnaire_weight":0.3}'), (True, 0.7, 0.3))
+        self.assertEqual(_decode("{}"), (False, 0.6, 0.4))
+        self.assertEqual(_decode("invalid"), (False, 0.6, 0.4))
 
 
 if __name__ == "__main__":

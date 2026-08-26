@@ -35,6 +35,9 @@ const exportPreviewLoading = ref(false)
 let exportPreviewRequestId = 0
 const publishingId = ref('')
 const analyzingId = ref('')
+const analysisErrorMsg = ref('')
+const batchAnalyzing = ref(false)
+const batchAnalyzeProgress = ref({ current: 0, total: 0 })
 const errorMessage = ref('')
 const sectionErrors = ref<string[]>([])
 const successMessage = ref('')
@@ -93,7 +96,7 @@ function metric(value: number | null | undefined, digits = 3) {
   return value == null ? '--' : value.toFixed(digits)
 }
 
-function exportTime(value: string | null) {
+function exportTime(value: string | null | undefined) {
   if (!value) return ''
   return new Date(value).toLocaleString('zh-CN', { hour12: false })
 }
@@ -357,19 +360,63 @@ async function publish(reportId: string) {
 
 async function analyze(runId: string) {
   analyzingId.value = runId
+  analysisErrorMsg.value = ''
   errorMessage.value = ''
+  successMessage.value = ''
   try {
     const response = await researchApi.startAnalysis(runId)
     if (response.data.status !== 'completed') {
-      throw new Error(response.data.error_message || '分析任务失败')
+      const err = response.data.error_message || '多模态分析未能完成，请检查模型服务或转录片段'
+      analysisErrorMsg.value = err
+      notify(`测评分析失败：${err}`, 'danger')
+      throw new Error(err)
     }
+    notify('测评分析完成，已生成元认知画像报告草稿！', 'success')
     successMessage.value = '测评分析完成，报告草稿已生成。'
     await loadPage()
   } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : '分析任务失败'
+    const msg = error instanceof Error ? error.message : '分析任务失败'
+    analysisErrorMsg.value = msg
+    errorMessage.value = msg
+    notify(msg, 'danger')
   } finally {
     analyzingId.value = ''
   }
+}
+
+async function batchAnalyzeAll() {
+  const pendingList = dashboard.value?.unanalyzed_runs ?? []
+  if (!pendingList.length || batchAnalyzing.value) return
+  const confirmed = await confirmAction({
+    title: `批量生成 ${pendingList.length} 份报告`,
+    message: `将依次对所选 ${pendingList.length} 份完整测评运行多模态分析引擎生成报告草稿，是否继续？`,
+    confirmText: '开始批量生成',
+    tone: 'primary'
+  })
+  if (!confirmed) return
+  batchAnalyzing.value = true
+  batchAnalyzeProgress.value = { current: 0, total: pendingList.length }
+  analysisErrorMsg.value = ''
+  let successCount = 0
+  let failCount = 0
+  for (const item of pendingList) {
+    batchAnalyzeProgress.value.current++
+    analyzingId.value = item.run_id
+    try {
+      const response = await researchApi.startAnalysis(item.run_id)
+      if (response.data.status === 'completed') {
+        successCount++
+      } else {
+        failCount++
+      }
+    } catch {
+      failCount++
+    }
+  }
+  analyzingId.value = ''
+  batchAnalyzing.value = false
+  notify(`批量分析完成：成功 ${successCount} 份${failCount ? `，失败 ${failCount} 份` : ''}`, failCount ? 'warning' : 'success')
+  await loadPage()
 }
 
 async function exportData(kind: 'csv' | 'bundle') {
@@ -852,21 +899,81 @@ onMounted(loadPage)
         </div>
       </div>
 
-      <div id="pending-analysis" v-if="dashboard?.unanalyzed_runs.length" class="card border-0 shadow-sm mt-4">
+      <div id="pending-analysis" v-if="dashboard?.unanalyzed_runs.length" class="card border-0 shadow-sm mt-4 pending-analysis-card">
         <div class="card-body p-4">
-          <h5>待生成报告的完整测评</h5>
-          <p class="text-muted small">分析任务按测评 ID 隔离上下文，完成后自动清除临时上下文。</p>
-          <div class="d-flex flex-wrap gap-2">
+          <div class="d-flex flex-wrap justify-content-between align-items-center gap-3 mb-3">
+            <div>
+              <div class="d-flex align-items-center gap-2">
+                <span class="badge bg-warning-subtle text-warning-emphasis">待处理</span>
+                <h5 class="mb-0">待生成报告的完整测评（共 {{ dashboard.unanalyzed_runs.length }} 份）</h5>
+              </div>
+              <p class="text-muted small mb-0 mt-1">学生已完成出声思维作答并通过质量核验；点击“开始多模态分析”将提取行为证据并生成画像报告草稿。</p>
+            </div>
             <button
-              v-for="item in dashboard.unanalyzed_runs"
-              :key="item.run_id"
-              class="btn btn-outline-primary"
-              :disabled="analyzingId === item.run_id"
-              @click="analyze(item.run_id)"
+              class="btn btn-sm btn-primary"
+              :disabled="batchAnalyzing || Boolean(analyzingId)"
+              @click="batchAnalyzeAll"
             >
-              <span v-if="analyzingId === item.run_id" class="spinner-border spinner-border-sm me-1" />
-              分析 {{ item.user_id.slice(0, 8) }} / {{ item.run_id.slice(0, 8) }}
+              <span v-if="batchAnalyzing" class="spinner-border spinner-border-sm me-1" />
+              <i v-else class="bi bi-play-circle me-1" />
+              {{ batchAnalyzing ? `正在批量分析 (${batchAnalyzeProgress.current}/${batchAnalyzeProgress.total})…` : '一键批量生成全部报告' }}
             </button>
+          </div>
+
+          <div v-if="analysisErrorMsg" class="alert alert-danger d-flex align-items-center justify-content-between gap-3 mb-3">
+            <div>
+              <i class="bi bi-exclamation-triangle-fill me-2" />
+              <strong>分析失败：</strong>{{ analysisErrorMsg }}
+            </div>
+            <button class="btn btn-sm btn-outline-danger" @click="analysisErrorMsg = ''">关闭提示</button>
+          </div>
+
+          <div class="table-responsive">
+            <table class="table align-middle mb-0 mobile-card-table">
+              <thead>
+                <tr>
+                  <th>学生信息</th>
+                  <th>测评任务</th>
+                  <th>完成时间</th>
+                  <th class="text-end">操作</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="item in dashboard.unanalyzed_runs" :key="item.run_id">
+                  <td data-label="学生信息">
+                    <div class="d-flex align-items-center gap-2">
+                      <span class="user-avatar-badge">{{ (item.user_name || '学')[0] }}</span>
+                      <div>
+                        <strong>{{ item.user_name || '未知学生' }}</strong>
+                        <small class="d-block text-muted">{{ item.username }} · {{ item.class_group || '未分班' }}</small>
+                      </div>
+                    </div>
+                  </td>
+                  <td data-label="测评任务">
+                    <div v-if="item.tasks?.length" class="task-flow-tags">
+                      <span v-for="(t, idx) in item.tasks" :key="t.task_id" class="task-tag">
+                        <small class="text-muted me-1">任务{{ t.sequence_no || idx + 1 }}:</small>{{ t.title }}
+                      </span>
+                    </div>
+                    <span v-else class="text-muted small">标准出声思维双任务</span>
+                  </td>
+                  <td data-label="完成时间">
+                    <span class="small text-muted"><i class="bi bi-clock-history me-1" />{{ exportTime(item.completed_at) || '刚刚' }}</span>
+                  </td>
+                  <td class="text-end" data-label="操作">
+                    <button
+                      class="btn btn-sm btn-outline-primary"
+                      :disabled="analyzingId === item.run_id || batchAnalyzing"
+                      @click="analyze(item.run_id)"
+                    >
+                      <span v-if="analyzingId === item.run_id" class="spinner-border spinner-border-sm me-1" />
+                      <i v-else class="bi bi-cpu me-1" />
+                      {{ analyzingId === item.run_id ? '正在分析计算…' : '开始多模态分析' }}
+                    </button>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
           </div>
         </div>
       </div>
@@ -1385,5 +1492,36 @@ onMounted(loadPage)
   .quality-mobile-table .quality-actions .btn { width: 100%; }
   .order-mobile-table .order-select { width: 100%; min-width: 0; }
   .report-mobile-table td:last-child .btn { width: 100%; min-height: 42px; }
+}
+
+.pending-analysis-card {
+  border-radius: var(--radius-xl);
+  overflow: hidden;
+}
+.user-avatar-badge {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  background: var(--color-primary-soft);
+  color: var(--color-primary);
+  display: grid;
+  place-items: center;
+  font-weight: 700;
+  font-size: .88rem;
+  flex-shrink: 0;
+}
+.task-flow-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.task-tag {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 8px;
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-subtle);
+  border: 1px solid var(--color-border);
+  font-size: .78rem;
 }
 </style>

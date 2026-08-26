@@ -161,10 +161,13 @@ onBeforeUnmount(() => {
               <dl class="metric-guide">
                 <div><dt>Accuracy</dt><dd>全部折外样本中预测正确的比例；类别不平衡时不能单独使用。</dd></div>
                 <div><dt>Macro-Precision</dt><dd>分别计算各类别精准率后等权平均，反映预测为某类时有多可靠。</dd></div>
+                <div><dt>Weighted-Precision</dt><dd>按各类别真实样本数加权的精准率，多数类对结果影响更大，应与 Macro-Precision 对照查看。</dd></div>
                 <div><dt>Macro-Recall</dt><dd>分别计算各类别召回率后等权平均，反映各类真实样本被找回的程度。</dd></div>
+                <div><dt>Weighted-Recall</dt><dd>按各类别真实样本数加权的召回率；在单标签多分类中通常与 Accuracy 相同，单独保留用于完整报告。</dd></div>
                 <div class="is-primary"><dt>Macro-F1</dt><dd>各类别 F1 的算术平均，是当前比较模型的首要指标。</dd></div>
                 <div><dt>Weighted-F1</dt><dd>按各类别真实样本数加权的 F1，更接近当前样本构成下的总体表现。</dd></div>
-                <div><dt>Macro-AUC</dt><dd>各类别一对其余 AUC 的宏平均；LinearSVC 使用决策分数，不代表概率。</dd></div>
+                <div><dt>Macro-AUC</dt><dd>基于全部折外预测汇总计算的一对其余（One-vs-Rest）Macro-AUC；LinearSVC 使用决策函数距离进行排序，不代表校准概率。</dd></div>
+                <div><dt>5-fold 稳定性</dt><dd>五折交叉验证各测试折指标的均值 ± 样本标准差（及极差），用于评估模型在不同数据划分下的稳定性。</dd></div>
                 <div><dt>Specificity</dt><dd>其他类别没有被误判为目标类别的能力；历史结果缺失时显示“—”。</dd></div>
                 <div><dt>Support</dt><dd>折外评估中该类别的真实样本数量，不是全量训练集数量。</dd></div>
               </dl>

@@ -1158,26 +1158,18 @@ async def clear_user_history(
     return {"status": "success", "message": "对话历史已清空", "deleted_turns": deleted}
 
 
-# ==================== 系统提示词管理 ====================
-
-from app.models.system_config import SystemConfig
-from pydantic import BaseModel as PydanticModel
-
-
-class PromptUpdate(PydanticModel):
-    content: str
-
-
 @router.get("/protocol-config", response_model=ProtocolConfigOut)
 async def get_protocol_config(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_role("admin")),
 ):
-    """读取新测评使用的协议开关；进行中的测评继续使用自己的快照。"""
+    """读取新测评使用的协议开关与多模态评分权重；进行中的测评继续使用自己的快照。"""
     del current_user
     config = await load_protocol_config(db)
     return ProtocolConfigOut(
         questionnaire_enabled=config.questionnaire_enabled,
+        behavior_weight=config.behavior_weight,
+        questionnaire_weight=config.questionnaire_weight,
         updated_at=config.updated_at,
     )
 
@@ -1188,48 +1180,20 @@ async def update_protocol_config(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_role("admin")),
 ):
-    """保存协议开关，只影响保存后创建的新测评。"""
+    """保存协议开关与多模态加权权重，只影响保存后创建的新测评与报告。"""
     del current_user
     config = await save_protocol_config(
         db,
         questionnaire_enabled=data.questionnaire_enabled,
+        behavior_weight=data.behavior_weight,
+        questionnaire_weight=data.questionnaire_weight,
     )
     return ProtocolConfigOut(
         questionnaire_enabled=config.questionnaire_enabled,
+        behavior_weight=config.behavior_weight,
+        questionnaire_weight=config.questionnaire_weight,
         updated_at=config.updated_at,
     )
-
-@router.put("/prompt")
-async def update_system_prompt(
-    data: PromptUpdate,
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_role("admin"))
-):
-    """更新系统提示词"""
-    result = await db.execute(
-        select(SystemConfig).where(SystemConfig.config_key == "system_prompt")
-    )
-    config = result.scalar_one_or_none()
-    if config:
-        config.config_value = data.content
-    else:
-        db.add(SystemConfig(config_key="system_prompt", config_value=data.content))
-    await db.commit()
-    return {"status": "success", "message": "提示词已更新"}
-
-
-@router.get("/scoring-rules")
-async def list_scoring_rules(user: User = Depends(require_role("admin"))):
-    return {"rules": [], "message": "评分规则管理接口预留"}
-
-@router.get("/consistency")
-async def list_consistency_reports(user: User = Depends(require_role("admin"))):
-    return {"reports": [], "message": "一致性报告接口预留"}
-
-@router.get("/dashboard")
-async def admin_dashboard(user: User = Depends(require_role("admin"))):
-    return {"total_sessions": 0, "total_users": 0, "total_reports": 0, "message": "管理仪表板接口预留"}
-
 
 @router.get(
     "/model-services/config",

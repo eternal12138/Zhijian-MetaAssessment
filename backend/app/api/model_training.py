@@ -385,7 +385,8 @@ async def export_comparison(
         snapshot = dict(job.config_snapshot or {})
         rows.append([
             EXPERIMENTS[experiment_type][2], job.version, job.sample_count,
-            metrics.get("accuracy"), metrics.get("macro_precision"), metrics.get("macro_recall"),
+            metrics.get("accuracy"), metrics.get("macro_precision"), metrics.get("weighted_precision"),
+            metrics.get("macro_recall"), metrics.get("weighted_recall"),
             metrics.get("macro_specificity"), metrics.get("macro_f1"), metrics.get("weighted_f1"), metrics.get("macro_auc_ovr"),
             metrics.get("cross_entropy"), "是" if job.is_active else "否",
             "人工调参" if snapshot.get("hyperparameters_tuned") else "默认参数",
@@ -393,7 +394,7 @@ async def export_comparison(
             job.completed_at.isoformat() if job.completed_at else "",
         ])
     content = _csv_bytes(
-        ["实验方案", "版本", "样本数", "Accuracy", "Macro-Precision", "Macro-Recall", "Macro-Specificity", "Macro-F1", "Weighted-F1", "Macro-AUC", "交叉熵", "生产启用", "参数来源", "分类器参数", "完成时间"],
+        ["实验方案", "版本", "样本数", "Accuracy", "Macro-Precision", "Weighted-Precision", "Macro-Recall", "Weighted-Recall", "Macro-Specificity", "Macro-F1", "Weighted-F1", "Macro-AUC", "交叉熵", "生产启用", "参数来源", "分类器参数", "完成时间"],
         rows,
     )
     db.add(AuditLog(
@@ -441,6 +442,7 @@ async def export_job_report(job_id: str, db: AsyncSession = Depends(get_db), use
         detail={"version": job.version},
     ))
     metrics = dict(job.metrics)
+    evaluation_view = load_job_evaluation(job, settings.model_training_path)
     snapshot = dict(job.config_snapshot or {})
     label_names = {0: "非元认知", 1: "监控", 2: "调控", 3: "评估"}
     metric_labels = sorted(int(label) for label in (metrics.get("per_class") or {}).keys())
@@ -448,14 +450,22 @@ async def export_job_report(job_id: str, db: AsyncSession = Depends(get_db), use
     archive = io.BytesIO()
     with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as package:
         package.writestr("训练摘要.csv", _csv_bytes(
-            ["版本", "实验方案", "状态", "样本数", "参数来源", "分类器参数", "Accuracy", "Macro-Precision", "Macro-Recall", "Macro-Specificity", "Macro-F1", "Weighted-F1", "交叉熵", "Macro-AUC"],
+            ["版本", "实验方案", "状态", "样本数", "参数来源", "分类器参数", "Accuracy", "Macro-Precision", "Weighted-Precision", "Macro-Recall", "Weighted-Recall", "Macro-Specificity", "Macro-F1", "Weighted-F1", "交叉熵", "Macro-AUC(Pooled OOF)", "五折Macro-F1均值", "五折Macro-F1标准差", "五折Macro-AUC均值", "五折Macro-AUC标准差", "Macro-F1 95%CI下限", "Macro-F1 95%CI上限", "折级Macro-AUC 95%CI下限", "折级Macro-AUC 95%CI上限"],
             [[
                 job.version, snapshot.get("display_name", ""), job.status,
                 job.sample_count, "人工调参" if snapshot.get("hyperparameters_tuned") else "默认参数",
                 json.dumps(snapshot.get("classifier_parameters") or {}, ensure_ascii=False, sort_keys=True),
-                metrics.get("accuracy"), metrics.get("macro_precision"),
-                metrics.get("macro_recall"), metrics.get("macro_specificity"), metrics.get("macro_f1"), metrics.get("weighted_f1"),
+                metrics.get("accuracy"), metrics.get("macro_precision"), metrics.get("weighted_precision"),
+                metrics.get("macro_recall"), metrics.get("weighted_recall"), metrics.get("macro_specificity"), metrics.get("macro_f1"), metrics.get("weighted_f1"),
                 metrics.get("cross_entropy"), metrics.get("macro_auc_ovr"),
+                evaluation_view["cross_validation"].get("macro_f1_mean"),
+                evaluation_view["cross_validation"].get("macro_f1_std"),
+                evaluation_view["cross_validation"].get("macro_auc_mean"),
+                evaluation_view["cross_validation"].get("macro_auc_std"),
+                evaluation_view["cross_validation"]["macro_f1_interval"].get("ci95_low"),
+                evaluation_view["cross_validation"]["macro_f1_interval"].get("ci95_high"),
+                evaluation_view["cross_validation"]["macro_auc_interval"].get("ci95_low"),
+                evaluation_view["cross_validation"]["macro_auc_interval"].get("ci95_high"),
             ]],
         ))
         package.writestr("训练参数.csv", _csv_bytes(
@@ -473,11 +483,14 @@ async def export_job_report(job_id: str, db: AsyncSession = Depends(get_db), use
               (per_class.get(str(label)) or {}).get("f1")] for label in metric_labels],
         ))
         package.writestr("五折结果.csv", _csv_bytes(
-            ["折", "训练样本数", "测试样本数", "训练Accuracy", "训练Macro-F1", "测试Accuracy", "测试Macro-Precision", "测试Macro-Recall", "测试Macro-Specificity", "测试Macro-F1", "测试Weighted-F1", "训练集类别分布", "测试集类别分布"],
+            ["折", "训练样本数", "测试样本数", "训练Accuracy", "训练Macro-F1", "测试Accuracy", "测试Macro-Precision", "测试Weighted-Precision", "测试Macro-Recall", "测试Weighted-Recall", "测试Macro-Specificity", "测试Macro-F1", "测试Weighted-F1", "测试Macro-AUC", "训练被试数", "测试被试数", "被试交集数", "被试隔离通过", "训练集类别分布", "测试集类别分布"],
             [[fold.get("fold"), fold.get("train_sample_count"), fold.get("sample_count"),
               fold.get("train_accuracy"), fold.get("train_macro_f1"), fold.get("accuracy"),
-              fold.get("macro_precision"), fold.get("macro_recall"), fold.get("macro_specificity"), fold.get("macro_f1"),
-              fold.get("weighted_f1"),
+              fold.get("macro_precision"), fold.get("weighted_precision"),
+              fold.get("macro_recall"), fold.get("weighted_recall"), fold.get("macro_specificity"), fold.get("macro_f1"),
+              fold.get("weighted_f1"), fold.get("macro_auc_ovr"),
+              fold.get("train_participant_count"), fold.get("test_participant_count"),
+              fold.get("participant_overlap_count"), fold.get("subject_disjoint_verified"),
               json.dumps(fold.get("train_label_distribution") or {}, ensure_ascii=False),
               json.dumps(fold.get("test_label_distribution") or {}, ensure_ascii=False)]
              for fold in metrics.get("folds", [])],
@@ -503,13 +516,22 @@ async def export_job_report(job_id: str, db: AsyncSession = Depends(get_db), use
             ["真实标签/预测标签", *labels],
             [[labels[index], *row] for index, row in enumerate(matrix)],
         ))
+        error_analysis = metrics.get("error_analysis") or {}
+        package.writestr("折外错误案例.csv", _csv_bytes(
+            ["被试标识", "清洗后文本", "真实标签", "预测标签"],
+            [[case.get("participant_id"), case.get("text"),
+              label_names.get(int(case.get("true_label")), case.get("true_label")),
+              label_names.get(int(case.get("predicted_label")), case.get("predicted_label"))]
+             for case in error_analysis.get("cases") or []],
+        ))
         package.writestr("冻结配置.json", json.dumps(snapshot, ensure_ascii=False, indent=2))
         package.writestr("完整指标.json", json.dumps(metrics, ensure_ascii=False, indent=2))
         package.writestr("说明.txt", (
             "本压缩包为‘知见’元认知分类模型训练结果。\n"
             "训练摘要.csv：整体折外指标；各类别指标.csv：当前训练标签表现；五折结果.csv：每折真实训练/测试数量、分布与性能；"
             "评估数据说明.csv：数据划分及可信边界；ROC曲线_*.csv：绘图使用的真实FPR/TPR点；"
-            "混淆矩阵.csv：真实标签与预测标签；冻结配置.json：创建任务时的配置快照。\n"
+            "混淆矩阵.csv：真实标签与预测标签；折外错误案例.csv：未参与对应折训练的误分类样本；冻结配置.json：创建任务时的配置快照。\n"
+            "Weighted-Precision、Weighted-Recall、Weighted-F1 均按真实类别样本数加权；Weighted-Recall 在单标签多分类中通常与 Accuracy 相同。\n"
             "训练参数.csv：本次实际使用的分类器参数及其来源；其中 LinearSVC/LogisticRegression 的 C 即结果对应的精确 C 值。\n"
             "ROC来自五折交叉验证的折外预测，不是最终模型在训练集上的自测，也不是独立外部测试集结果。\n"
             "模型启用仍须由管理员在研究管理页面人工确认。\n"
@@ -518,6 +540,41 @@ async def export_job_report(job_id: str, db: AsyncSession = Depends(get_db), use
     return Response(
         content=archive.getvalue(), media_type="application/zip",
         headers={"Content-Disposition": f'attachment; filename="model-report-{safe_version}.zip"'},
+    )
+
+
+@router.get("/jobs/{job_id}/error-cases/export")
+async def export_job_error_cases(
+    job_id: str,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_role("admin")),
+):
+    job = await db.get(ModelTrainingJob, job_id)
+    if not job:
+        raise HTTPException(404, "训练任务不存在")
+    if job.status != "completed" or not job.metrics:
+        raise HTTPException(409, "只有已完成的训练任务可以导出错误案例")
+    metrics = dict(job.metrics)
+    error_analysis = metrics.get("error_analysis") or {}
+    cases = error_analysis.get("cases") or []
+    label_names = {0: "非元认知", 1: "监控", 2: "调控", 3: "评估"}
+    csv_data = _csv_bytes(
+        ["被试标识", "清洗后文本", "真实标签", "预测标签"],
+        [
+            [
+                case.get("participant_id") or "未提供",
+                case.get("text") or "",
+                label_names.get(int(case.get("true_label")), case.get("true_label")),
+                label_names.get(int(case.get("predicted_label")), case.get("predicted_label")),
+            ]
+            for case in cases
+        ],
+    )
+    safe_version = "".join(character if character.isalnum() or character in "._-" else "_" for character in job.version)
+    return Response(
+        content=csv_data,
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="model-error-cases-{safe_version}.csv"'},
     )
 
 

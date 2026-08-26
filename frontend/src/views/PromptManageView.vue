@@ -8,7 +8,7 @@ import AppModal from '../components/ui/AppModal.vue'
 import ModelPerformanceGuideOrb from '../components/training/ModelPerformanceGuideOrb.vue'
 
 const templates = ref<MethodTemplate[]>([])
-const selectedKey = ref<MethodTemplate['template_key']>('coding_prompt')
+const selectedKey = ref<MethodTemplate['template_key']>('report_prompt')
 const content = ref('')
 const version = ref('draft-2')
 const isLoading = ref(true)
@@ -21,6 +21,13 @@ const templateAudits = ref<TemplateAudit[]>([])
 const auditLoading = ref(true)
 const questionnaireEnabled = ref(false)
 const savedQuestionnaireEnabled = ref(false)
+const behaviorWeightPercent = ref(60)
+const savedBehaviorWeightPercent = ref(60)
+const questionnaireWeightPercent = computed(() => 100 - behaviorWeightPercent.value)
+const hasProtocolChanges = computed(() =>
+  questionnaireEnabled.value !== savedQuestionnaireEnabled.value ||
+  behaviorWeightPercent.value !== savedBehaviorWeightPercent.value
+)
 const protocolConfigLoading = ref(true)
 const protocolConfigSaving = ref(false)
 const protocolConfigUpdatedAt = ref<string | null>(null)
@@ -28,14 +35,9 @@ const protocolErrorMessage = ref('')
 const protocolSuccessMessage = ref('')
 const narrationSlots = ref<NarrationSlot[]>([])
 const narrationLoading = ref(true)
-const narrationBusyKey = ref<string | null>(null)
+const narrationBusyKey = ref('')
 const narrationErrorMessage = ref('')
-const narrationSuccessMessage = ref('')
-const selectedNarrationFiles = ref<Record<string, File | undefined>>({})
-const previewingAssetId = ref<string | null>(null)
-const confirmDisableAssetId = ref<string | null>(null)
-let previewAudio: HTMLAudioElement | null = null
-let previewObjectUrl: string | null = null
+const narrationAudioUrls = ref<Record<string, string>>({})
 const trainingJobs = ref<ModelTrainingJob[]>([])
 const modelEvaluationIndex = ref<ModelEvaluationIndex | null>(null)
 const modelEvaluationLoading = ref(true)
@@ -456,7 +458,9 @@ const historicalComparisonMetricDefinitions: Array<{
 }> = [
   { key: 'accuracy', title: 'Accuracy', note: '折外样本预测正确比例' },
   { key: 'macro_precision', title: 'Macro-Precision', note: '三类 Precision 等权平均' },
+  { key: 'weighted_precision', title: 'Weighted-Precision', note: '按真实类别样本数加权的 Precision' },
   { key: 'macro_recall', title: 'Macro-Recall', note: '三类 Recall 等权平均' },
+  { key: 'weighted_recall', title: 'Weighted-Recall', note: '按真实类别样本数加权的 Recall' },
   { key: 'macro_specificity', title: 'Macro-Specificity', note: '三类 Specificity 等权平均' },
   { key: 'macro_f1', title: 'Macro-F1', note: '首要比较指标' },
   { key: 'weighted_f1', title: 'Weighted-F1', note: '按真实类别样本数加权' },
@@ -601,19 +605,24 @@ function exportHistoricalModelComparison() {
   }
   const headers = [
     '训练版本', '模型版本', '特征与分类器', '数据版本', '训练时间', '样本数',
-    'Accuracy', 'Macro-Precision', 'Macro-Recall', 'Macro-Specificity', 'Macro-F1',
-    'Weighted-F1', 'Macro-AUC', '交叉熵', '监控F1', '调控F1', '评估F1',
-    '五折Macro-F1均值', '五折Macro-F1标准差', '折间极差', '训练-折外差距', '过拟合风险',
+    'Accuracy', 'Macro-Precision', 'Weighted-Precision', 'Macro-Recall', 'Weighted-Recall', 'Macro-Specificity', 'Macro-F1',
+    'Weighted-F1', 'Macro-AUC(Pooled OOF)', '交叉熵', '监控F1', '调控F1', '评估F1',
+    '五折Macro-F1均值', '五折Macro-F1标准差',
+    '五折Macro-AUC均值', '五折Macro-AUC标准差', '折间极差', '训练-折外差距', '过拟合风险',
     '数据指纹', '验证方式'
   ]
   const rows = selectedHistoricalComparisonModels.value.map(({ group, model }) => [
     group.display_version, model.model_version, evaluationModelName(model), model.dataset.version,
     model.trained_at, model.dataset.sample_count, model.summary.accuracy,
-    model.summary.macro_precision, model.summary.macro_recall, model.summary.macro_specificity,
+    model.summary.macro_precision, model.summary.weighted_precision,
+    model.summary.macro_recall, model.summary.weighted_recall, model.summary.macro_specificity,
     model.summary.macro_f1, model.summary.weighted_f1, model.summary.macro_auc_ovr,
     model.summary.cross_entropy, performanceClassF1(model, '1'), performanceClassF1(model, '2'),
     performanceClassF1(model, '3'), model.cross_validation.macro_f1_mean,
-    model.cross_validation.macro_f1_std, model.cross_validation.macro_f1_range,
+    model.cross_validation.macro_f1_std,
+    model.cross_validation.macro_auc_mean,
+    model.cross_validation.macro_auc_std,
+    model.cross_validation.macro_f1_range,
     model.cross_validation.train_test_macro_f1_gap, overfitRisk(model).label,
     model.dataset.fingerprint, evaluationSplitLabel(model)
   ])
@@ -677,10 +686,13 @@ function performanceMetricRows(job: ModelEvaluation | null) {
   return [
     { label: 'Accuracy', value: job?.summary.accuracy, note: '全部折外样本中预测正确的比例' },
     { label: 'Macro-Precision', value: job?.summary.macro_precision, note: '各实际训练类别精准率等权平均' },
+    { label: 'Weighted-Precision', value: job?.summary.weighted_precision, note: '按各类别真实样本数加权的精准率，多数类影响更大' },
     { label: 'Macro-Recall', value: job?.summary.macro_recall, note: '各实际训练类别召回率等权平均' },
+    { label: 'Weighted-Recall', value: job?.summary.weighted_recall, note: '按各类别真实样本数加权的召回率；单标签多分类中通常与 Accuracy 数值相同' },
     { label: 'Macro-Specificity', value: job?.summary.macro_specificity, note: '各实际训练类别特异性等权平均' },
     { label: 'Macro-F1', value: job?.summary.macro_f1, note: '首要比较指标：各类别 F1 等权平均' },
-    { label: 'Macro-AUC', value: job?.summary.macro_auc_ovr, note: '一对其余的折外排序区分能力' }
+    { label: 'Weighted-F1', value: job?.summary.weighted_f1, note: '按各类别真实样本数加权的 F1，当前系统已计算并在模型比较中展示' },
+    { label: 'Macro-AUC', value: job?.summary.macro_auc_ovr, note: '基于全部折外预测汇总计算的 One-vs-Rest Macro-AUC (Pooled OOF)' }
   ]
 }
 
@@ -712,25 +724,15 @@ function sampleCountRange(values: number[]) {
 }
 
 const definitions = {
+  report_prompt: {
+    label: 'AI 报告与元认知画像提示词',
+    kind: 'prompt',
+    help: '必须保留 {overall_score} 与 {dimension_results} 占位符；指导火山方舟大模型依据监控、调控、评估三分类评估结果与证据，端到端生成综合画像诊断、等级评定与个性化学习干预策略。'
+  },
   metacognitive_extractor: {
     label: '元认知候选抽取提示词',
     kind: 'prompt',
-    help: '必须保留 {segments}；仅做高召回候选抽取，不得输出最终维度、评分或诊断。'
-  },
-  coding_prompt: {
-    label: 'AI 编码提示词',
-    kind: 'prompt',
-    help: '必须保留 {segments} 占位符；正式提示词完成后创建新版本即可替换。'
-  },
-  scoring_standard: {
-    label: '评分标准模板',
-    kind: 'scoring',
-    help: 'JSON 格式。可替换行为/问卷权重、等级名称和说明。'
-  },
-  intervention_templates: {
-    label: '干预建议模板',
-    kind: 'intervention',
-    help: 'JSON 格式，分别配置 monitoring、controlDebugging、evaluation。'
+    help: '必须保留 {segments} 占位符；仅从权威 ASR 转录中做高召回候选证据抽取，不得输出最终维度、评分或诊断。'
   }
 } as const
 
@@ -835,6 +837,9 @@ async function loadProtocolConfig() {
     const response = await adminApi.getProtocolConfig()
     questionnaireEnabled.value = response.data.questionnaire_enabled
     savedQuestionnaireEnabled.value = response.data.questionnaire_enabled
+    const bPct = Math.round((response.data.behavior_weight ?? 0.6) * 100)
+    behaviorWeightPercent.value = bPct
+    savedBehaviorWeightPercent.value = bPct
     protocolConfigUpdatedAt.value = response.data.updated_at
   } catch (error) {
     protocolErrorMessage.value = error instanceof Error ? error.message : '协议配置加载失败'
@@ -848,12 +853,21 @@ async function saveProtocolConfig() {
   protocolErrorMessage.value = ''
   protocolSuccessMessage.value = ''
   try {
-    const response = await adminApi.updateProtocolConfig(questionnaireEnabled.value)
+    const bWeight = behaviorWeightPercent.value / 100
+    const qWeight = questionnaireWeightPercent.value / 100
+    const response = await adminApi.updateProtocolConfig({
+      questionnaire_enabled: questionnaireEnabled.value,
+      behavior_weight: bWeight,
+      questionnaire_weight: qWeight,
+    })
     savedQuestionnaireEnabled.value = response.data.questionnaire_enabled
+    const bPct = Math.round((response.data.behavior_weight ?? 0.6) * 100)
+    behaviorWeightPercent.value = bPct
+    savedBehaviorWeightPercent.value = bPct
     protocolConfigUpdatedAt.value = response.data.updated_at
     protocolSuccessMessage.value = questionnaireEnabled.value
-      ? '任务后问卷已启用，仅影响之后新建的测评。'
-      : '任务后问卷已关闭，之后新建的测评将在任务二后直接进入提交确认。'
+      ? `测评协议与加权配置已更新（行为证据 ${bPct}% + 问卷量表 ${100 - bPct}%），将在新测评与报告中生效。`
+      : `测评协议与加权配置已更新（任务后问卷已关闭，行为证据按 100% 独立计算），将在新测评与报告中生效。`
   } catch (error) {
     protocolErrorMessage.value = error instanceof Error ? error.message : '协议配置保存失败'
   } finally {
@@ -871,107 +885,96 @@ function formatBytes(value: number) {
   return `${(value / 1024 / 1024).toFixed(2)} MB`
 }
 
+function narrationCategoryLabel(category: NarrationSlot['category']) {
+  return ({
+    instruction: '测评说明',
+    practice: '练习阶段',
+    questionnaire: '问卷阶段',
+    task: '正式任务',
+    silence: '静默提醒'
+  } as const)[category]
+}
+
+function clearNarrationAudioUrls() {
+  Object.values(narrationAudioUrls.value).forEach(url => URL.revokeObjectURL(url))
+  narrationAudioUrls.value = {}
+}
+
 async function loadNarrationSlots() {
   narrationLoading.value = true
   narrationErrorMessage.value = ''
   try {
     narrationSlots.value = (await adminApi.listNarrationSlots()).data
   } catch (error) {
-    narrationErrorMessage.value = error instanceof Error ? error.message : '真人录音配置加载失败'
+    narrationErrorMessage.value = error instanceof Error ? error.message : '朗读资源加载失败'
   } finally {
     narrationLoading.value = false
   }
 }
 
-function selectNarrationFile(slotKey: string, event: Event) {
+async function uploadNarration(slot: NarrationSlot, event: Event) {
   const input = event.target as HTMLInputElement
-  selectedNarrationFiles.value = {
-    ...selectedNarrationFiles.value,
-    [slotKey]: input.files?.[0]
-  }
-  narrationErrorMessage.value = ''
-  narrationSuccessMessage.value = ''
-}
-
-async function uploadNarration(slot: NarrationSlot) {
-  const file = selectedNarrationFiles.value[slot.slot_key]
+  const file = input.files?.[0]
+  input.value = ''
   if (!file) return
   narrationBusyKey.value = slot.slot_key
   narrationErrorMessage.value = ''
-  narrationSuccessMessage.value = ''
   try {
     await adminApi.uploadNarration(slot.slot_key, file)
-    selectedNarrationFiles.value = {
-      ...selectedNarrationFiles.value,
-      [slot.slot_key]: undefined
-    }
+    clearNarrationAudioUrls()
     await loadNarrationSlots()
-    narrationSuccessMessage.value = `${slot.label}已上传并启用新版本。`
+    notify(`已更新“${slot.label}”朗读录音`, 'success')
   } catch (error) {
-    narrationErrorMessage.value = error instanceof Error ? error.message : '录音上传失败'
+    narrationErrorMessage.value = error instanceof Error ? error.message : '朗读录音上传失败'
   } finally {
-    narrationBusyKey.value = null
+    narrationBusyKey.value = ''
   }
-}
-
-function stopPreview() {
-  previewAudio?.pause()
-  previewAudio = null
-  previewingAssetId.value = null
-  if (previewObjectUrl) URL.revokeObjectURL(previewObjectUrl)
-  previewObjectUrl = null
 }
 
 async function previewNarration(slot: NarrationSlot) {
-  const asset = slot.asset
-  if (!asset) return
-  if (previewingAssetId.value === asset.id) {
-    stopPreview()
-    return
-  }
-  stopPreview()
+  if (!slot.asset) return
   narrationBusyKey.value = slot.slot_key
   narrationErrorMessage.value = ''
   try {
-    const response = await adminApi.getNarrationAudio(asset.id)
-    previewObjectUrl = URL.createObjectURL(response.data)
-    previewAudio = new Audio(previewObjectUrl)
-    previewingAssetId.value = asset.id
-    previewAudio.onended = stopPreview
-    previewAudio.onerror = () => {
-      narrationErrorMessage.value = '录音无法播放，请重新上传有效的音频文件。'
-      stopPreview()
+    const existing = narrationAudioUrls.value[slot.asset.id]
+    if (existing) {
+      URL.revokeObjectURL(existing)
+      delete narrationAudioUrls.value[slot.asset.id]
+    } else {
+      const response = await adminApi.getNarrationAudio(slot.asset.id)
+      narrationAudioUrls.value[slot.asset.id] = URL.createObjectURL(response.data)
     }
-    await previewAudio.play()
   } catch (error) {
-    stopPreview()
-    narrationErrorMessage.value = error instanceof Error ? error.message : '录音试听失败'
+    narrationErrorMessage.value = error instanceof Error ? error.message : '朗读录音读取失败'
   } finally {
-    narrationBusyKey.value = null
+    narrationBusyKey.value = ''
   }
 }
 
 async function disableNarration(slot: NarrationSlot) {
-  const asset = slot.asset
-  if (!asset) return
-  if (confirmDisableAssetId.value !== asset.id) {
-    confirmDisableAssetId.value = asset.id
-    return
-  }
+  if (!slot.asset) return
+  const confirmed = await confirmAction({
+    title: '停用当前朗读录音',
+    message: `确定停用“${slot.label}”的当前版本吗？历史测评仍会保留原版本，新测评将使用浏览器语音回退。`,
+    confirmText: '确认停用',
+    tone: 'warning'
+  })
+  if (!confirmed) return
   narrationBusyKey.value = slot.slot_key
   narrationErrorMessage.value = ''
   try {
-    stopPreview()
-    await adminApi.disableNarration(asset.id)
-    confirmDisableAssetId.value = null
+    await adminApi.disableNarration(slot.asset.id)
+    clearNarrationAudioUrls()
     await loadNarrationSlots()
-    narrationSuccessMessage.value = `${slot.label}的当前录音已停用。`
+    notify(`已停用“${slot.label}”当前录音`, 'success')
   } catch (error) {
-    narrationErrorMessage.value = error instanceof Error ? error.message : '停用录音失败'
+    narrationErrorMessage.value = error instanceof Error ? error.message : '朗读录音停用失败'
   } finally {
-    narrationBusyKey.value = null
+    narrationBusyKey.value = ''
   }
 }
+
+
 
 function trainingStatus(job: ModelTrainingJob) {
   const status = ({ queued: '排队中', running: '处理中', completed: '已完成', failed: '失败', cancelled: '已取消' } as const)[job.status]
@@ -1284,6 +1287,30 @@ async function exportTrainingComparison() {
   }
 }
 
+const isExportingErrorCases = ref(false)
+
+async function exportOofErrorCases(job: ModelEvaluation | null | undefined) {
+  if (!job) return
+  isExportingErrorCases.value = true
+  try {
+    const response = await researchApi.exportModelErrorCases(job.model_id)
+    const url = URL.createObjectURL(response.data)
+    const anchor = document.createElement('a')
+    anchor.href = url
+    const safeVer = (job.model_version || 'v1').replace(/[^\w.-]/g, '_')
+    anchor.download = `模型-${safeVer}-折外错误案例.csv`
+    document.body.appendChild(anchor)
+    anchor.click()
+    anchor.remove()
+    URL.revokeObjectURL(url)
+    notify(`已成功导出 ${job.model_version} 的全部 ${job.error_analysis?.total_error_count ?? ''} 条折外错误案例 CSV`, 'success')
+  } catch (error) {
+    notify(error instanceof Error ? error.message : '折外错误案例导出失败', 'danger')
+  } finally {
+    isExportingErrorCases.value = false
+  }
+}
+
 async function cancelTrainingJob(job: ModelTrainingJob) {
   const confirmed = await confirmAction({ title: '取消训练任务', message: `确定取消 ${job.version} 吗？运行中的任务会在当前安全检查点停止。`, confirmText: '确认取消', tone: 'warning' })
   if (!confirmed) return
@@ -1365,8 +1392,8 @@ onMounted(() => {
   }, 4000)
 })
 onBeforeUnmount(() => {
-  stopPreview()
   if (trainingPoll !== null) window.clearInterval(trainingPoll)
+  clearNarrationAudioUrls()
 })
 </script>
 
@@ -1639,9 +1666,55 @@ onBeforeUnmount(() => {
               </section>
             </div>
 
+            <section class="performance-evidence-panel">
+              <div class="performance-section-title"><div><strong>交叉验证证据与可信边界</strong><small>由最新最佳模型的真实五折折外结果生成</small></div><span>{{ latestBestPerformanceJob.cross_validation.fold_count }} 折</span></div>
+              <div class="performance-evidence-grid">
+                <article>
+                  <small>5-fold Macro-F1 稳定性</small>
+                  <strong>{{ metric(latestBestPerformanceJob.cross_validation.macro_f1_mean) }} ± {{ metric(latestBestPerformanceJob.cross_validation.macro_f1_std) }}</strong>
+                  <p>五折测试折 Macro-F1 均值 ± 样本标准差；极差 {{ metric(latestBestPerformanceJob.cross_validation.macro_f1_range) }}。</p>
+                </article>
+                <article>
+                  <small>5-fold Macro-AUC 稳定性</small>
+                  <strong>{{ metric(latestBestPerformanceJob.cross_validation.macro_auc_mean) }} ± {{ metric(latestBestPerformanceJob.cross_validation.macro_auc_std) }}</strong>
+                  <p>分别计算 5 个测试折的 Macro-AUC 并统计均值 ± 样本标准差，用于观察不同划分下的性能稳定性；极差 {{ metric(latestBestPerformanceJob.cross_validation.macro_auc_range) }}。</p>
+                </article>
+                <article :class="{ 'is-verified': latestBestPerformanceJob.cross_validation.subject_disjoint_audit?.all_folds_verified }"><small>被试泄漏检查</small><strong>{{ latestBestPerformanceJob.cross_validation.subject_disjoint_audit?.all_folds_verified ? '五折交集均为 0' : '证据不完整' }}</strong><p>{{ latestBestPerformanceJob.cross_validation.subject_disjoint_audit?.note }}</p></article>
+                <article><small>外部验证</small><strong>{{ latestBestPerformanceJob.dataset.external_holdout ? '已完成' : '尚未完成' }}</strong><p>内部交叉验证不能替代独立学校、任务或新被试数据验证。</p></article>
+              </div>
+              <div class="weighted-metric-note"><i class="bi bi-info-circle-fill"></i><p><b>加权指标说明：</b>Weighted-Precision、Weighted-Recall 与 Weighted-F1 均按各类别真实样本数加权，多数类影响更大。当前系统原有 Weighted-F1 已保留；Weighted-Recall 在单标签多分类任务中通常与 Accuracy 相同，但仍单独展示以保持报告口径完整。</p></div>
+              <details v-if="latestBestPerformanceJob.error_analysis" class="performance-error-cases">
+                <summary class="d-flex align-items-center justify-content-between flex-wrap gap-2">
+                  <span>查看折外错误案例（{{ latestBestPerformanceJob.error_analysis.total_error_count }} 条）</span>
+                  <button
+                    v-if="latestBestPerformanceJob.error_analysis.total_error_count > 0"
+                    type="button"
+                    class="btn btn-sm btn-outline-primary py-0 px-2 ms-auto"
+                    :disabled="isExportingErrorCases"
+                    @click.stop="exportOofErrorCases(latestBestPerformanceJob)"
+                  >
+                    <span v-if="isExportingErrorCases" class="spinner-border spinner-border-sm me-1"></span>
+                    <i v-else class="bi bi-download me-1"></i>导出全部错误案例 (CSV)
+                  </button>
+                </summary>
+                <p>{{ latestBestPerformanceJob.error_analysis.note }}</p>
+                <div class="table-responsive"><table class="table table-sm"><thead><tr><th>被试</th><th>清洗后文本</th><th>真实标签</th><th>预测标签</th></tr></thead><tbody><tr v-for="(row, index) in latestBestPerformanceJob.error_analysis.cases.slice(0, 20)" :key="`error-${index}`"><td>{{ row.participant_id || '未提供' }}</td><td>{{ row.text }}</td><td>{{ latestBestPerformanceJob.labels.find(label => label.id === row.true_label)?.name || row.true_label }}</td><td>{{ latestBestPerformanceJob.labels.find(label => label.id === row.predicted_label)?.name || row.predicted_label }}</td></tr></tbody></table></div>
+                <small>页面展示前 20 条预览；点击上方“导出全部错误案例”按钮可完整下载全部 {{ latestBestPerformanceJob.error_analysis.total_error_count }} 条折外错误样本 CSV 文件。</small>
+              </details>
+              <details class="performance-error-cases evidence-gap-list">
+                <summary>查看仍缺少的研究证据</summary>
+                <ul>
+                  <li><b>模型间统计显著性：</b>{{ latestBestPerformanceJob.evidence_coverage.pairwise_statistical_test ? '已生成' : latestBestPerformanceJob.evidence_coverage.notes.pairwise_statistical_test }}</li>
+                  <li><b>跨任务/跨情境迁移：</b>{{ latestBestPerformanceJob.evidence_coverage.cross_task_transfer ? '已生成' : latestBestPerformanceJob.evidence_coverage.notes.cross_task_transfer }}</li>
+                  <li><b>专家标签质量：</b>{{ latestBestPerformanceJob.evidence_coverage.expert_reliability_bound_to_dataset ? '已与训练版本绑定' : latestBestPerformanceJob.evidence_coverage.notes.expert_reliability_bound_to_dataset }}</li>
+                  <li><b>ASR 与文本清洗质量：</b>{{ latestBestPerformanceJob.evidence_coverage.asr_quality_bound_to_dataset ? '已与训练版本绑定' : latestBestPerformanceJob.evidence_coverage.notes.asr_quality_bound_to_dataset }}</li>
+                </ul>
+              </details>
+            </section>
+
             <section class="performance-model-comparison">
               <div class="performance-section-title"><div><strong>同版本模型比较</strong><small>绿色标记只在数据指纹、标签顺序一致且本批次所选模型结果齐全时出现；参数可在详情和导出报告中追溯</small></div></div>
-              <div class="table-responsive"><table class="table align-middle mb-0"><thead><tr><th>模型</th><th title="全部折外样本预测正确比例">Accuracy</th><th title="各类别 Precision 等权平均">Macro-P</th><th title="各类别 Recall 等权平均">Macro-R</th><th title="首要模型比较指标">Macro-F1</th><th title="按各类别真实样本数加权的 F1">Weighted-F1</th><th title="一对其余的折外 ROC-AUC 平均">Macro-AUC</th><th title="各折 Macro-F1 最大值减最小值">折间极差</th><th title="平均训练 Macro-F1 与折外 Macro-F1 的差距">过拟合风险</th></tr></thead><tbody><template v-for="job in latestPerformanceGroup.models" :key="`performance-${job.model_id}`"><tr :class="{ 'is-best-performance': job.model_id === latestPerformanceGroup.best_model_id }"><td><strong>{{ evaluationModelName(job) }}</strong><small>{{ job.model_version }}</small></td><td>{{ metric(job.summary.accuracy) }}</td><td>{{ metric(job.summary.macro_precision) }}</td><td>{{ metric(job.summary.macro_recall) }}</td><td><b>{{ metric(job.summary.macro_f1) }}</b></td><td>{{ metric(job.summary.weighted_f1) }}</td><td>{{ metric(job.summary.macro_auc_ovr) }}</td><td>{{ metric(job.cross_validation.macro_f1_range) }}</td><td><span class="overfit-risk-badge" :class="overfitRisk(job).tone">{{ overfitRisk(job).label }}<template v-if="overfitRisk(job).gap !== null"> {{ metric(overfitRisk(job).gap) }}</template></span></td></tr><tr><td colspan="9" class="p-0"><details class="performance-model-details"><summary>查看类别、混淆矩阵与训练信息</summary><div class="performance-detail-grid"><section><strong>各类别表现（Support 为折外真实样本数）</strong><div class="table-responsive"><table class="table table-sm"><thead><tr><th>类别</th><th>Precision</th><th>Recall</th><th>F1</th><th>Support</th></tr></thead><tbody><tr v-for="row in job.per_class" :key="`${job.model_id}-${row.label_id}`"><td>{{ row.label_name }}</td><td>{{ metric(row.precision) }}</td><td>{{ metric(row.recall) }}</td><td>{{ metric(row.f1) }}</td><td>{{ row.support ?? '—' }}</td></tr></tbody></table></div></section><section><strong>混淆矩阵（行=真实，列=预测）</strong><div class="table-responsive"><table class="table table-sm"><thead><tr><th>真实＼预测</th><th v-for="label in job.labels" :key="`head-${label.id}`">{{ label.name }}</th></tr></thead><tbody><tr v-for="(row, rowIndex) in job.confusion_matrix" :key="`matrix-${rowIndex}`"><th>{{ job.labels[rowIndex]?.name }}</th><td v-for="(value, columnIndex) in row" :key="`matrix-${rowIndex}-${columnIndex}`">{{ value }}</td></tr></tbody></table></div><small v-if="job.confusion_pairs.length" class="text-muted">主要混淆：{{ job.confusion_pairs.slice(0, 3).map(pair => `${pair.actual_label}→${pair.predicted_label} ${pair.count}次`).join('；') }}</small><small v-else class="text-muted">本次折外结果未产生非零混淆对。</small></section><section><strong>交叉验证</strong><dl class="performance-compact-facts"><dt>CV Macro-F1</dt><dd>{{ metric(job.cross_validation.macro_f1_mean) }} ± {{ metric(job.cross_validation.macro_f1_std) }}</dd><dt>训练—折外差距</dt><dd class="generalization-gap"><b>{{ metric(job.cross_validation.train_test_macro_f1_gap) }}</b><small><i class="bi bi-info-circle" />训练集指标与折外预测指标之差，用于辅助观察模型过拟合程度；差距越大通常意味着模型在训练数据上的性能明显高于未见数据。</small></dd><dt>过拟合风险</dt><dd><span class="overfit-risk-badge" :class="overfitRisk(job).tone">{{ overfitRisk(job).label }}</span><small class="validation-level-note">{{ overfitRisk(job).message }}</small></dd><dt>验证等级</dt><dd><span class="validation-level" :class="{ 'is-external': job.dataset.external_holdout }"><i class="bi" :class="job.dataset.external_holdout ? 'bi-patch-check-fill' : 'bi-shield-check'" />{{ job.dataset.external_holdout ? '独立留出测试' : '内部交叉验证' }}</span><small v-if="!job.dataset.external_holdout" class="validation-level-note">内部五折折外预测，尚无独立外部测试集</small></dd><dt>AUC 分数来源</dt><dd>{{ job.roc_evaluation?.score_type === 'decision_function' ? 'decision score（不是概率）' : job.roc_evaluation?.score_type === 'predict_proba' ? 'predict_proba' : '未记录' }}</dd></dl></section><section><strong>数据分布</strong><p class="small text-muted mb-0">{{ job.labels.map(label => `${label.name} ${job.dataset.class_distribution?.[String(label.id)] ?? '—'}`).join(' · ') }}</p></section><section class="performance-data-facts"><strong>评估、模型与数据来源</strong><dl><dt>训练版本</dt><dd>{{ job.model_version }}</dd><dt>训练时间</dt><dd>{{ formatUpdatedAt(job.trained_at) }}</dd><dt>数据版本</dt><dd>{{ job.dataset.version || '未记录' }}</dd><dt>数据指纹</dt><dd>{{ job.dataset.fingerprint?.slice(0, 16) || '未记录' }}</dd><dt>特征/分类器</dt><dd>{{ evaluationModelName(job) }}</dd><dt>Embedding</dt><dd>{{ job.model_info.embedding_provider || '不适用' }} / {{ job.model_info.embedding_model || '不适用' }}</dd><dt>样本/被试/类别</dt><dd>{{ job.dataset.sample_count }} / {{ job.dataset.participant_count ?? '未记录' }} / {{ job.dataset.class_count }}</dd><dt>每折训练/测试数</dt><dd>{{ sampleCountRange(job.cross_validation.train_sample_counts) }} / {{ sampleCountRange(job.cross_validation.test_sample_counts) }}</dd><dt>划分/随机种子</dt><dd>{{ evaluationSplitLabel(job) }} / {{ job.dataset.random_seed ?? '未记录' }}</dd><dt>外部独立验证</dt><dd>{{ job.dataset.external_holdout ? '是' : '否，仅内部折外评估' }}</dd><dt>数据来源</dt><dd>Training Evaluation Result</dd><dt>产物校验</dt><dd>{{ job.source.metrics_sha256.slice(0, 12) }}</dd></dl></section></div></details></td></tr></template></tbody></table></div>
+              <div class="table-responsive"><table class="table align-middle mb-0"><thead><tr><th>模型</th><th title="全部折外样本预测正确比例">Accuracy</th><th title="各类别 Precision 等权平均">Macro-P</th><th title="各类别 Recall 等权平均">Macro-R</th><th title="首要模型比较指标">Macro-F1</th><th title="按各类别真实样本数加权的 F1">Weighted-F1</th><th title="一对其余的折外 ROC-AUC 平均">Macro-AUC</th><th title="各折 Macro-F1 最大值减最小值">折间极差</th><th title="平均训练 Macro-F1 与折外 Macro-F1 的差距">过拟合风险</th></tr></thead><tbody><template v-for="job in latestPerformanceGroup.models" :key="`performance-${job.model_id}`"><tr :class="{ 'is-best-performance': job.model_id === latestPerformanceGroup.best_model_id }"><td><strong>{{ evaluationModelName(job) }}</strong><small>{{ job.model_version }}</small></td><td>{{ metric(job.summary.accuracy) }}</td><td>{{ metric(job.summary.macro_precision) }}</td><td>{{ metric(job.summary.macro_recall) }}</td><td><b>{{ metric(job.summary.macro_f1) }}</b></td><td>{{ metric(job.summary.weighted_f1) }}</td><td>{{ metric(job.summary.macro_auc_ovr) }}</td><td>{{ metric(job.cross_validation.macro_f1_range) }}</td><td><span class="overfit-risk-badge" :class="overfitRisk(job).tone">{{ overfitRisk(job).label }}<template v-if="overfitRisk(job).gap !== null"> {{ metric(overfitRisk(job).gap) }}</template></span></td></tr><tr><td colspan="9" class="p-0"><details class="performance-model-details"><summary>查看类别、混淆矩阵与训练信息</summary><div class="performance-detail-grid"><section><strong>各类别表现（Support 为折外真实样本数）</strong><div class="table-responsive"><table class="table table-sm"><thead><tr><th>类别</th><th>Precision</th><th>Recall</th><th>F1</th><th>Support</th></tr></thead><tbody><tr v-for="row in job.per_class" :key="`${job.model_id}-${row.label_id}`"><td>{{ row.label_name }}</td><td>{{ metric(row.precision) }}</td><td>{{ metric(row.recall) }}</td><td>{{ metric(row.f1) }}</td><td>{{ row.support ?? '—' }}</td></tr></tbody></table></div></section><section><strong>混淆矩阵（行=真实，列=预测）</strong><div class="table-responsive"><table class="table table-sm"><thead><tr><th>真实＼预测</th><th v-for="label in job.labels" :key="`head-${label.id}`">{{ label.name }}</th></tr></thead><tbody><tr v-for="(row, rowIndex) in job.confusion_matrix" :key="`matrix-${rowIndex}`"><th>{{ job.labels[rowIndex]?.name }}</th><td v-for="(value, columnIndex) in row" :key="`matrix-${rowIndex}-${columnIndex}`">{{ value }}</td></tr></tbody></table></div><small v-if="job.confusion_pairs.length" class="text-muted">主要混淆：{{ job.confusion_pairs.slice(0, 3).map(pair => `${pair.actual_label}→${pair.predicted_label} ${pair.count}次`).join('；') }}</small><small v-else class="text-muted">本次折外结果未产生非零混淆对。</small></section><section><strong>交叉验证与稳定性</strong><dl class="performance-compact-facts"><dt>CV Macro-F1</dt><dd><b>{{ metric(job.cross_validation.macro_f1_mean) }} ± {{ metric(job.cross_validation.macro_f1_std) }}</b><small class="validation-level-note">五折测试折 Macro-F1 均值 ± 样本标准差；极差 {{ metric(job.cross_validation.macro_f1_range) }}</small></dd><dt>CV Macro-AUC</dt><dd><b>{{ metric(job.cross_validation.macro_auc_mean) }} ± {{ metric(job.cross_validation.macro_auc_std) }}</b><small class="validation-level-note">五折测试折 Macro-AUC 均值 ± 样本标准差；极差 {{ metric(job.cross_validation.macro_auc_range) }}</small></dd><dt>训练—折外差距</dt><dd class="generalization-gap"><b>{{ metric(job.cross_validation.train_test_macro_f1_gap) }}</b><small><i class="bi bi-info-circle" />训练集指标与折外预测指标之差，用于辅助观察模型过拟合程度；差距越大通常意味着模型在训练数据上的性能明显高于未见数据。</small></dd><dt>过拟合风险</dt><dd><span class="overfit-risk-badge" :class="overfitRisk(job).tone">{{ overfitRisk(job).label }}</span><small class="validation-level-note">{{ overfitRisk(job).message }}</small></dd><dt>验证等级</dt><dd><span class="validation-level" :class="{ 'is-external': job.dataset.external_holdout }"><i class="bi" :class="job.dataset.external_holdout ? 'bi-patch-check-fill' : 'bi-shield-check'" />{{ job.dataset.external_holdout ? '独立留出测试' : '内部交叉验证' }}</span><small v-if="!job.dataset.external_holdout" class="validation-level-note">内部五折折外预测，尚无独立外部测试集</small></dd><dt>AUC 分数来源</dt><dd>{{ job.roc_evaluation?.score_type === 'decision_function' ? 'decision score（不是概率）' : job.roc_evaluation?.score_type === 'predict_proba' ? 'predict_proba' : '未记录' }}</dd></dl></section><section><strong>数据分布</strong><p class="small text-muted mb-0">{{ job.labels.map(label => `${label.name} ${job.dataset.class_distribution?.[String(label.id)] ?? '—'}`).join(' · ') }}</p></section><section class="performance-data-facts"><strong>评估、模型与数据来源</strong><dl><dt>训练版本</dt><dd>{{ job.model_version }}</dd><dt>训练时间</dt><dd>{{ formatUpdatedAt(job.trained_at) }}</dd><dt>数据版本</dt><dd>{{ job.dataset.version || '未记录' }}</dd><dt>数据指纹</dt><dd>{{ job.dataset.fingerprint?.slice(0, 16) || '未记录' }}</dd><dt>特征/分类器</dt><dd>{{ evaluationModelName(job) }}</dd><dt>Embedding</dt><dd>{{ job.model_info.embedding_provider || '不适用' }} / {{ job.model_info.embedding_model || '不适用' }}</dd><dt>样本/被试/类别</dt><dd>{{ job.dataset.sample_count }} / {{ job.dataset.participant_count ?? '未记录' }} / {{ job.dataset.class_count }}</dd><dt>每折训练/测试数</dt><dd>{{ sampleCountRange(job.cross_validation.train_sample_counts) }} / {{ sampleCountRange(job.cross_validation.test_sample_counts) }}</dd><dt>划分/随机种子</dt><dd>{{ evaluationSplitLabel(job) }} / {{ job.dataset.random_seed ?? '未记录' }}</dd><dt>外部独立验证</dt><dd>{{ job.dataset.external_holdout ? '是' : '否，仅内部折外评估' }}</dd><dt>数据来源</dt><dd>Training Evaluation Result</dd><dt>产物校验</dt><dd>{{ job.source.metrics_sha256.slice(0, 12) }}</dd></dl></section></div></details></td></tr></template></tbody></table></div>
             </section>
           </template>
 
@@ -1704,6 +1777,8 @@ onBeforeUnmount(() => {
               <div class="history-winner-metrics">
                 <article v-for="definition in historicalComparisonMetricDefinitions" :key="`winner-${definition.key}`" :class="{ 'is-single-best': isHistoricalSummaryMetricBest(selectedHistoricalBestEntry.model, definition.key) }"><span>{{ definition.title }}</span><strong>{{ metric(selectedHistoricalBestEntry.model.summary[definition.key]) }}</strong><small v-if="isHistoricalSummaryMetricBest(selectedHistoricalBestEntry.model, definition.key)"><i class="bi bi-award-fill"></i>该项最优</small><small v-else><i class="bi bi-stars"></i>综合最优模型指标</small></article>
                 <article :class="{ 'is-single-best': isHistoricalSummaryMetricBest(selectedHistoricalBestEntry.model, 'cross_entropy') }"><span>交叉熵</span><strong>{{ metric(selectedHistoricalBestEntry.model.summary.cross_entropy) }}</strong><small v-if="isHistoricalSummaryMetricBest(selectedHistoricalBestEntry.model, 'cross_entropy')"><i class="bi bi-award-fill"></i>该项最低（最优）</small><small v-else><i class="bi bi-stars"></i>综合最优模型指标</small></article>
+                <article><span>五折 AUC 稳定性</span><strong>{{ metric(selectedHistoricalBestEntry.model.cross_validation.macro_auc_mean) }} ± {{ metric(selectedHistoricalBestEntry.model.cross_validation.macro_auc_std) }}</strong><small><i class="bi bi-stars"></i>极差 {{ metric(selectedHistoricalBestEntry.model.cross_validation.macro_auc_range) }}</small></article>
+                <article><span>五折 F1 稳定性</span><strong>{{ metric(selectedHistoricalBestEntry.model.cross_validation.macro_f1_mean) }} ± {{ metric(selectedHistoricalBestEntry.model.cross_validation.macro_f1_std) }}</strong><small><i class="bi bi-stars"></i>极差 {{ metric(selectedHistoricalBestEntry.model.cross_validation.macro_f1_range) }}</small></article>
                 <article :class="{ 'is-single-best': isHistoricalCvMetricBest(selectedHistoricalBestEntry.model, 'macro_f1_range') }"><span>折间极差</span><strong>{{ metric(selectedHistoricalBestEntry.model.cross_validation.macro_f1_range) }}</strong><small v-if="isHistoricalCvMetricBest(selectedHistoricalBestEntry.model, 'macro_f1_range')"><i class="bi bi-award-fill"></i>该项最低（最优）</small><small v-else><i class="bi bi-stars"></i>综合最优模型指标</small></article>
                 <article :class="{ 'is-single-best': isHistoricalCvMetricBest(selectedHistoricalBestEntry.model, 'train_test_macro_f1_gap') }"><span>训练—折外差距</span><strong>{{ metric(selectedHistoricalBestEntry.model.cross_validation.train_test_macro_f1_gap) }}</strong><small v-if="isHistoricalCvMetricBest(selectedHistoricalBestEntry.model, 'train_test_macro_f1_gap')"><i class="bi bi-award-fill"></i>该项最低（最优）</small><small v-else><i class="bi bi-stars"></i>{{ overfitRisk(selectedHistoricalBestEntry.model).label }}</small></article>
               </div>
@@ -1759,7 +1834,7 @@ onBeforeUnmount(() => {
     </details>
 
     <details class="research-fold-card mb-4" open>
-      <summary><span><i class="bi bi-ui-checks-grid"></i><strong>标准测评协议</strong><small>控制问卷与测评流程快照</small></span><i class="bi bi-chevron-down fold-chevron"></i></summary>
+      <summary><span><i class="bi bi-sliders2"></i><strong>测评协议与多模态评分加权</strong><small>配置任务后问卷与过程行为证据的自定义融合权重</small></span><i class="bi bi-chevron-down fold-chevron"></i></summary>
     <section class="card border-0 shadow-sm protocol-config-card">
       <div class="card-body p-4">
         <div v-if="protocolErrorMessage" class="alert alert-danger py-2">
@@ -1768,153 +1843,175 @@ onBeforeUnmount(() => {
         <div v-if="protocolSuccessMessage" class="alert alert-success py-2">
           <i class="bi bi-check-circle-fill me-2"></i>{{ protocolSuccessMessage }}
         </div>
-        <div class="d-flex flex-wrap justify-content-between align-items-start gap-3">
-          <div class="protocol-config-copy">
+        <div class="row g-4 align-items-center">
+          <div class="col-lg-5">
             <div class="d-flex align-items-center gap-2 mb-2">
               <span class="protocol-icon"><i class="bi bi-ui-checks-grid"></i></span>
               <div>
-                <h5 class="mb-0">标准测评协议</h5>
-                <small class="text-muted">控制之后新建测评是否包含附录二的 7 点问卷；题目数量以当前协议版本为准</small>
+                <h5 class="mb-0">标准测评协议流程</h5>
+                <small class="text-muted">控制新建测评是否包含任务后 7 点元认知问卷</small>
               </div>
             </div>
-            <p class="text-muted small mb-2">
-              配置会在学生开始测评时保存为运行快照。已经进行中的测评不会因这里的修改而改变流程。
+            <p class="text-muted small mb-3">
+              配置会在学生开始测评时保存为运行快照。进行中的测评不会受修改影响。
             </p>
-            <small class="text-muted">上次保存：{{ formatUpdatedAt(protocolConfigUpdatedAt) }}</small>
+            <label class="questionnaire-switch">
+              <input v-model="questionnaireEnabled" type="checkbox">
+              <span class="questionnaire-switch-track">
+                <span class="questionnaire-switch-thumb"></span>
+              </span>
+              <span>
+                <strong>{{ questionnaireEnabled ? '已启用任务后问卷' : '已关闭任务后问卷' }}</strong>
+                <small>
+                  {{ questionnaireEnabled ? '测评链路：任务一 → 任务二 → 问卷 → 提交' : '测评链路：任务一 → 任务二 → 提交' }}
+                </small>
+              </span>
+            </label>
           </div>
-          <div class="protocol-config-control">
-            <div v-if="protocolConfigLoading" class="spinner-border spinner-border-sm text-primary" />
-            <template v-else>
-              <label class="questionnaire-switch">
-                <input v-model="questionnaireEnabled" type="checkbox">
-                <span class="questionnaire-switch-track">
-                  <span class="questionnaire-switch-thumb"></span>
-                </span>
-                <span>
-                  <strong>{{ questionnaireEnabled ? '启用任务后问卷' : '关闭任务后问卷' }}</strong>
-                  <small>
-                    {{ questionnaireEnabled ? '任务二 → 问卷 → 提交确认' : '任务二 → 提交确认' }}
-                  </small>
-                </span>
-              </label>
+
+          <div class="col-lg-7 border-start-lg ps-lg-4">
+            <div class="d-flex align-items-center justify-content-between mb-2">
+              <h6 class="mb-0"><i class="bi bi-pie-chart-fill me-2 text-primary"></i>多模态综合得分自定义加权</h6>
+              <span class="badge bg-primary-subtle text-primary">
+                {{ questionnaireEnabled ? `行为 ${behaviorWeightPercent}% : 问卷 ${questionnaireWeightPercent}%` : '行为 100% (问卷已关闭)' }}
+              </span>
+            </div>
+            <p class="text-muted small mb-3">
+              设置出声思维言语行为频次与任务后问卷得分在综合维度报告中的数学融合比例：
+            </p>
+
+            <div class="weight-slider-container mb-3" :class="{ 'opacity-50 pointer-events-none': !questionnaireEnabled }">
+              <div class="d-flex justify-content-between align-items-center mb-1">
+                <label class="form-label small mb-0 fw-semibold">
+                  <i class="bi bi-mic-fill me-1 text-primary"></i>过程性行为证据权重
+                </label>
+                <div class="input-group input-group-sm" style="width: 100px;">
+                  <input
+                    v-model.number="behaviorWeightPercent"
+                    type="number"
+                    min="0"
+                    max="100"
+                    class="form-control form-control-sm text-end"
+                    :disabled="!questionnaireEnabled"
+                  >
+                  <span class="input-group-text">%</span>
+                </div>
+              </div>
+              <input
+                v-model.number="behaviorWeightPercent"
+                type="range"
+                min="0"
+                max="100"
+                step="5"
+                class="form-range"
+                :disabled="!questionnaireEnabled"
+              >
+              <div class="d-flex justify-content-between small text-muted">
+                <span>出声思维行为: {{ behaviorWeightPercent }}%</span>
+                <span>量表问卷: {{ questionnaireWeightPercent }}%</span>
+              </div>
+            </div>
+
+            <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 pt-2 border-top">
+              <small class="text-muted">上次保存：{{ formatUpdatedAt(protocolConfigUpdatedAt) }}</small>
               <button
-                class="btn btn-primary"
-                :disabled="protocolConfigSaving || questionnaireEnabled === savedQuestionnaireEnabled"
+                class="btn btn-primary btn-sm px-3"
+                :disabled="protocolConfigSaving || !hasProtocolChanges"
                 @click="saveProtocolConfig"
               >
                 <span v-if="protocolConfigSaving" class="spinner-border spinner-border-sm me-1"></span>
-                保存协议配置
+                保存协议与加权配置
               </button>
-            </template>
+            </div>
           </div>
         </div>
       </div>
     </section>
-    </details>
 
-    <details class="research-fold-card mb-4">
-      <summary><span><i class="bi bi-mic-fill"></i><strong>真人朗读录音</strong><small>管理标准指导语音频版本</small></span><i class="bi bi-chevron-down fold-chevron"></i></summary>
-    <section class="card border-0 shadow-sm narration-card">
+    <section class="card border-0 shadow-sm mt-4">
       <div class="card-body p-4">
-        <div class="d-flex flex-wrap justify-content-between align-items-start gap-3 mb-3">
+        <div class="d-flex flex-wrap justify-content-between align-items-start gap-2 mb-3">
           <div>
-            <h5 class="mb-1"><i class="bi bi-mic-fill me-2 text-primary"></i>真人朗读录音</h5>
-            <p class="text-muted small mb-0">
-              上传后，新测评优先播放真人录音；旧测评继续使用开始时的录音版本。
-            </p>
+            <h5 class="mb-1"><i class="bi bi-volume-up-fill me-2 text-primary"></i>固定协议真人朗读</h5>
+            <p class="text-muted small mb-0">新上传版本只影响之后创建的测评；进行中的测评继续使用创建时保存的资源快照。</p>
           </div>
-          <span v-if="narrationLoading" class="narration-count-skeleton" aria-label="正在读取真人录音配置" />
-          <span v-else class="badge bg-primary-subtle text-primary px-3 py-2">
-            已配置 {{ narrationSlots.filter(item => item.asset).length }} / {{ narrationSlots.length }}
-          </span>
+          <button class="btn btn-outline-secondary btn-sm" :disabled="narrationLoading" @click="loadNarrationSlots">
+            <span v-if="narrationLoading" class="spinner-border spinner-border-sm me-1" />
+            <i v-else class="bi bi-arrow-clockwise me-1" />刷新
+          </button>
         </div>
 
         <div v-if="narrationErrorMessage" class="alert alert-danger py-2">
-          <i class="bi bi-exclamation-triangle-fill me-2"></i>{{ narrationErrorMessage }}
+          <i class="bi bi-exclamation-triangle-fill me-2" />{{ narrationErrorMessage }}
         </div>
-        <div v-if="narrationSuccessMessage" class="alert alert-success py-2">
-          <i class="bi bi-check-circle-fill me-2"></i>{{ narrationSuccessMessage }}
-        </div>
-        <div v-if="narrationLoading" class="narration-skeleton-list" aria-busy="true" aria-label="正在读取真人录音配置">
-          <div v-for="index in 3" :key="index" class="narration-skeleton-row" aria-hidden="true">
-            <div class="skeleton-copy">
-              <span class="skeleton-line skeleton-title" />
-              <span class="skeleton-line" />
-              <span class="skeleton-line skeleton-short" />
-            </div>
-            <div class="skeleton-actions">
-              <span class="skeleton-control" />
-              <span class="skeleton-button" />
-            </div>
-          </div>
-        </div>
-        <div v-else class="narration-list">
-          <article v-for="slot in narrationSlots" :key="slot.slot_key" class="narration-row">
-            <div class="narration-copy">
-              <div class="d-flex flex-wrap align-items-center gap-2 mb-1">
-                <strong>{{ slot.label }}</strong>
-                <span v-if="slot.asset" class="badge bg-success-subtle text-success">
-                  版本 {{ slot.asset.version }}
-                </span>
-                <span v-else class="badge bg-warning-subtle text-warning">未上传</span>
+        <div v-if="narrationLoading" class="py-4 text-center"><div class="spinner-border text-primary" /></div>
+        <div v-else-if="!narrationSlots.length" class="alert alert-warning mb-0">固定协议尚未生成任何朗读槽位。</div>
+        <div v-else class="d-grid gap-3">
+          <article v-for="slot in narrationSlots" :key="slot.slot_key" class="border rounded-3 p-3">
+            <div class="d-flex flex-wrap justify-content-between gap-3">
+              <div class="flex-grow-1" style="min-width: 240px">
+                <div class="d-flex flex-wrap align-items-center gap-2 mb-1">
+                  <strong>{{ slot.label }}</strong>
+                  <span class="badge bg-light text-secondary border">{{ narrationCategoryLabel(slot.category) }}</span>
+                  <span v-if="slot.asset" class="badge bg-success-subtle text-success">版本 {{ slot.asset.version }}</span>
+                  <span v-else class="badge bg-warning-subtle text-warning">未上传，将使用语音回退</span>
+                </div>
+                <p class="small text-muted mb-2">{{ slot.source_text }}</p>
+                <div v-if="slot.asset" class="small text-muted">
+                  {{ slot.asset.original_filename }} · {{ formatBytes(slot.asset.size_bytes) }} ·
+                  {{ formatUpdatedAt(slot.asset.created_at) }}
+                </div>
+                <audio
+                  v-if="slot.asset && narrationAudioUrls[slot.asset.id]"
+                  class="w-100 mt-2"
+                  controls
+                  autoplay
+                  :src="narrationAudioUrls[slot.asset.id]"
+                />
               </div>
-              <p class="small text-muted mb-2">{{ slot.source_text }}</p>
-              <small v-if="slot.asset" class="text-muted">
-                {{ slot.asset.original_filename }} · {{ formatBytes(slot.asset.size_bytes) }} ·
-                {{ parseApiDate(slot.asset.created_at).toLocaleString('zh-CN', { hour12: false }) }}
-              </small>
-            </div>
-            <div class="narration-actions">
-              <input
-                type="file"
-                class="form-control form-control-sm"
-                accept=".mp3,.wav,.m4a,.ogg,.webm,audio/mpeg,audio/wav,audio/mp4,audio/ogg,audio/webm"
-                :disabled="narrationBusyKey === slot.slot_key"
-                @change="selectNarrationFile(slot.slot_key, $event)"
-              >
-              <div class="d-flex flex-wrap gap-2">
-                <button
-                  class="btn btn-sm btn-primary"
-                  :disabled="!selectedNarrationFiles[slot.slot_key] || narrationBusyKey === slot.slot_key"
-                  @click="uploadNarration(slot)"
-                >
-                  <span v-if="narrationBusyKey === slot.slot_key" class="spinner-border spinner-border-sm me-1"></span>
-                  {{ slot.asset ? '上传新版本' : '上传录音' }}
-                </button>
+              <div class="d-flex flex-wrap align-content-start gap-2">
                 <button
                   v-if="slot.asset"
-                  class="btn btn-sm btn-outline-primary"
+                  class="btn btn-outline-primary btn-sm"
                   :disabled="narrationBusyKey === slot.slot_key"
                   @click="previewNarration(slot)"
                 >
-                  <i :class="previewingAssetId === slot.asset.id ? 'bi-stop-fill' : 'bi-play-fill'" class="bi me-1"></i>
-                  {{ previewingAssetId === slot.asset.id ? '停止' : '试听' }}
+                  <i class="bi" :class="narrationAudioUrls[slot.asset.id] ? 'bi-stop-circle' : 'bi-play-circle'" />
+                  {{ narrationAudioUrls[slot.asset.id] ? '关闭试听' : '试听' }}
                 </button>
+                <label class="btn btn-primary btn-sm mb-0" :class="{ disabled: narrationBusyKey === slot.slot_key }">
+                  <span v-if="narrationBusyKey === slot.slot_key" class="spinner-border spinner-border-sm me-1" />
+                  <i v-else class="bi bi-upload me-1" />{{ slot.asset ? '上传新版本' : '上传录音' }}
+                  <input
+                    class="visually-hidden"
+                    type="file"
+                    accept="audio/wav,audio/mpeg,audio/mp4,audio/webm,audio/ogg"
+                    :disabled="narrationBusyKey === slot.slot_key"
+                    @change="uploadNarration(slot, $event)"
+                  >
+                </label>
                 <button
                   v-if="slot.asset"
-                  class="btn btn-sm btn-outline-danger"
+                  class="btn btn-outline-danger btn-sm"
                   :disabled="narrationBusyKey === slot.slot_key"
                   @click="disableNarration(slot)"
-                >
-                  {{ confirmDisableAssetId === slot.asset.id ? '再次点击确认停用' : '停用当前录音' }}
-                </button>
+                ><i class="bi bi-slash-circle me-1" />停用</button>
               </div>
             </div>
           </article>
         </div>
-        <div class="small text-muted mt-3">
-          支持 MP3、WAV、M4A、OGG 和 WebM，单个文件不超过 20 MB。未配置或播放失败时会降级使用浏览器中文朗读。
-        </div>
       </div>
     </section>
     </details>
 
+
+
     <details class="research-fold-card mb-4">
-      <summary><span><i class="bi bi-stars"></i><strong>AI 提示词、评分模板与审计</strong><small>版本化保存并追踪启用和回滚记录</small></span><i class="bi bi-chevron-down fold-chevron"></i></summary>
+      <summary><span><i class="bi bi-stars"></i><strong>AI 提示词管理与审计</strong><small>版本化保存并追踪启用和回滚记录</small></span><i class="bi bi-chevron-down fold-chevron"></i></summary>
       <div class="fold-content">
     <div class="section-heading mb-3">
       <div>
-        <h5 class="mb-1"><i class="bi bi-stars me-2 text-primary"></i>AI 提示词与评分模板</h5>
+        <h5 class="mb-1"><i class="bi bi-stars me-2 text-primary"></i>AI 提示词管理</h5>
         <p class="text-muted small mb-0">每次保存会创建独立版本，不会修改上方的标准测评协议。</p>
       </div>
     </div>
@@ -1935,11 +2032,14 @@ onBeforeUnmount(() => {
           <button
             v-for="(definition, key) in definitions"
             :key="key"
-            class="list-group-item list-group-item-action"
+            class="list-group-item list-group-item-action template-tab-item"
             :class="{ active: selectedKey === key }"
             @click="selectTemplate(key)"
           >
-            {{ definition.label }}
+            <div class="d-flex align-items-center justify-content-between w-100">
+              <span>{{ definition.label }}</span>
+              <i v-if="selectedKey === key" class="bi bi-check2-circle text-white ms-2 fs-6"></i>
+            </div>
           </button>
         </div>
         <div class="card border-0 shadow-sm mt-3">
@@ -2346,6 +2446,21 @@ onBeforeUnmount(() => {
 .model-performance-card > summary strong { font-size: 1rem; }
 .model-performance-card > summary small { margin-top: .18rem; font-size: .78rem; line-height: 1.45; }
 .model-performance-card > .fold-content { padding: 1.15rem; background: color-mix(in srgb,var(--color-surface-subtle) 40%,transparent); }
+.performance-evidence-panel { margin: 1rem 0; padding: 1rem; border: 1px solid var(--color-border); border-radius: var(--radius-lg); background: var(--color-surface); }
+.performance-evidence-grid { display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); gap: .75rem; }
+.performance-evidence-grid article { min-width: 0; padding: .85rem; border: 1px solid var(--color-border); border-radius: var(--radius-md); background: var(--color-surface-subtle); }
+.performance-evidence-grid article.is-verified { border-color: color-mix(in srgb,var(--color-success) 55%,var(--color-border)); background: color-mix(in srgb,var(--color-success) 8%,var(--color-surface)); }
+.performance-evidence-grid small { color: var(--color-text-muted); }
+.performance-evidence-grid strong { display: block; margin: .25rem 0; font-size: 1.05rem; color: var(--color-text); }
+.performance-evidence-grid p,.weighted-metric-note p,.performance-error-cases > p { margin: 0; color: var(--color-text-muted); font-size: .78rem; line-height: 1.55; }
+.weighted-metric-note { display: flex; gap: .65rem; margin-top: .8rem; padding: .75rem .85rem; border-radius: var(--radius-md); background: color-mix(in srgb,var(--color-primary) 8%,var(--color-surface-subtle)); color: var(--color-primary); }
+.performance-error-cases { margin-top: .8rem; padding: .75rem .85rem; border: 1px solid var(--color-border); border-radius: var(--radius-md); }
+.performance-error-cases > summary { cursor: pointer; color: var(--color-text); font-weight: 700; }
+.performance-error-cases > p { margin: .55rem 0; }
+.performance-error-cases td:nth-child(2) { min-width: 260px; white-space: normal; }
+.evidence-gap-list ul { margin: .65rem 0 0; padding-left: 1.1rem; color: var(--color-text-muted); font-size: .8rem; line-height: 1.65; }
+.evidence-gap-list li + li { margin-top: .35rem; }
+.evidence-gap-list b { color: var(--color-text); }
 .performance-loading,.performance-empty { display: grid; place-items: center; gap: .65rem; min-height: 180px; color: var(--color-text-muted); text-align: center; }
 .performance-empty i { color: var(--color-primary); font-size: 2rem; }
 .performance-empty strong { color: var(--color-text); }
@@ -2626,8 +2741,25 @@ onBeforeUnmount(() => {
 .template-save-area .form-control { min-width: 150px; }
 .template-save-area .btn { white-space: nowrap; }
 .template-editor { font-family: Consolas, 'Courier New', monospace; font-size: .82rem; line-height: 1.65; }
+.template-tab-item {
+  padding: 0.85rem 1rem;
+  font-size: 0.92rem;
+  font-weight: 500;
+  border: 1px solid var(--color-border);
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+.template-tab-item.active {
+  background: linear-gradient(135deg, #6366f1, #4f46e5) !important;
+  border-color: #6366f1 !important;
+  color: #ffffff !important;
+  font-weight: 600;
+  box-shadow: 0 4px 16px rgba(99, 102, 241, 0.4);
+}
 .version-row { display: flex; align-items: center; gap: .45rem; padding: .4rem; border-bottom: 1px solid var(--color-border); border-radius: .5rem; font-size: .82rem; }
-.version-row.is-viewed { background: rgba(75, 94, 232, .08); }
+.version-row.is-viewed {
+  background: rgba(99, 102, 241, 0.15) !important;
+  border-left: 3px solid var(--color-primary, #6366f1);
+}
 .version-view { min-width: 0; margin-right: auto; padding: .2rem 0; border: 0; background: transparent; color: inherit; text-align: left; overflow-wrap: anywhere; }
 .version-view:hover { color: var(--bs-primary); }
 .history-comparison-card { border-color: color-mix(in srgb,#06b6d4 30%,var(--color-border-strong)); background: linear-gradient(155deg,color-mix(in srgb,#06b6d4 7%,var(--color-surface)),var(--color-surface) 38%); }
@@ -2799,6 +2931,7 @@ onBeforeUnmount(() => {
   .history-score-hover-target:hover .history-score-track { transform:translateY(-1px); box-shadow:0 0 0 2px color-mix(in srgb,var(--series-color) 30%,transparent),0 5px 12px color-mix(in srgb,var(--series-color) 14%,transparent); }
 }
 @media (max-width: 991.98px) {
+  .performance-evidence-grid { grid-template-columns: repeat(2,minmax(0,1fr)); }
   .narration-row { grid-template-columns: 1fr; padding: .85rem; }
   .comparison-toolbar { align-items: stretch; flex-wrap: wrap; }
   .comparison-toolbar-copy { flex-basis: 100%; }
@@ -2827,6 +2960,7 @@ onBeforeUnmount(() => {
   .history-metric-grid { grid-template-columns:1fr; }
 }
 @media (max-width: 575.98px) {
+  .performance-evidence-grid { grid-template-columns: 1fr; }
   .comparison-toolbar { flex-direction: column; }
   .comparison-group-select { align-items: stretch; flex: 0 0 auto; flex-direction: column; width: 100%; }
   .comparison-group-label { max-width: 100%; }

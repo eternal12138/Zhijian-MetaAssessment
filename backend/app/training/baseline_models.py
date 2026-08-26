@@ -127,9 +127,15 @@ def _classification_metrics(
         "accuracy": float(accuracy_score(labels, predictions)),
         "macro_precision": float(precision_score(labels, predictions, average="macro", zero_division=0)),
         "macro_recall": float(recall_score(labels, predictions, average="macro", zero_division=0)),
+        "weighted_precision": float(precision_score(labels, predictions, average="weighted", zero_division=0)),
+        "weighted_recall": float(recall_score(labels, predictions, average="weighted", zero_division=0)),
         "macro_specificity": float(np.mean(per_specificity)),
         "macro_f1": float(f1_score(labels, predictions, average="macro", zero_division=0)),
         "weighted_f1": float(f1_score(labels, predictions, average="weighted", zero_division=0)),
+        # This private field is consumed by the training service to create a
+        # bounded error-analysis snapshot, then removed before metrics.json is
+        # written.  It keeps text/participant metadata out of model code.
+        "_oof_predictions": [int(value) for value in predictions.tolist()],
         "folds": fold_metrics,
         "confusion_matrix": confusion_matrix(
             labels, predictions, labels=list(TRAINING_LABELS)
@@ -209,9 +215,19 @@ def _fold_row(
     labels: np.ndarray,
     predictions: np.ndarray,
     train_predictions: np.ndarray,
+    scores: np.ndarray | None = None,
+    probabilities: np.ndarray | None = None,
+    groups: np.ndarray | None = None,
+    grouped: bool = False,
 ) -> dict:
     """记录一折中真实训练集、测试集规模、分布和性能。"""
-    return {
+    weighted_precision = float(precision_score(
+        labels[test_idx], predictions, average="weighted", zero_division=0
+    ))
+    weighted_recall = float(recall_score(
+        labels[test_idx], predictions, average="weighted", zero_division=0
+    ))
+    row: dict[str, Any] = {
         "fold": fold,
         "train_sample_count": int(len(train_idx)),
         "sample_count": int(len(test_idx)),
@@ -229,9 +245,45 @@ def _fold_row(
         "macro_recall": float(recall_score(
             labels[test_idx], predictions, average="macro", zero_division=0
         )),
+        "weighted_precision": weighted_precision,
+        "weighted_recall": weighted_recall,
         "macro_specificity": float(np.mean(_specificities(labels[test_idx], predictions))),
         "accuracy": float(accuracy_score(labels[test_idx], predictions)),
     }
+    if grouped and groups is not None:
+        train_groups = {str(value) for value in groups[train_idx]}
+        test_groups = {str(value) for value in groups[test_idx]}
+        overlap = train_groups & test_groups
+        row.update({
+            "train_participant_count": len(train_groups),
+            "test_participant_count": len(test_groups),
+            "participant_overlap_count": len(overlap),
+            "subject_disjoint_verified": not overlap,
+        })
+    else:
+        row.update({
+            "train_participant_count": None,
+            "test_participant_count": None,
+            "participant_overlap_count": None,
+            "subject_disjoint_verified": None,
+        })
+    if scores is not None:
+        binary = label_binarize(labels[test_idx], classes=list(TRAINING_LABELS))
+        per_class_auc: dict[str, float | None] = {}
+        for index, label in enumerate(TRAINING_LABELS):
+            target = binary[:, index]
+            per_class_auc[str(label)] = (
+                float(roc_auc_score(target, scores[:, index]))
+                if len(np.unique(target)) == 2 else None
+            )
+        valid_auc = [value for value in per_class_auc.values() if value is not None]
+        row["per_class_auc"] = per_class_auc
+        row["macro_auc_ovr"] = float(np.mean(valid_auc)) if len(valid_auc) == len(TRAINING_LABELS) else None
+    if probabilities is not None:
+        row["cross_entropy"] = float(log_loss(
+            labels[test_idx], probabilities, labels=list(TRAINING_LABELS)
+        ))
+    return row
 
 
 # ---------------------------------------------------------------------------
@@ -283,9 +335,11 @@ def train_tfidf_linear_svc(
         train_predictions = pipeline.predict(texts[train_idx].tolist())
         fold_predictions = pipeline.predict(texts[test_idx].tolist())
         predictions[test_idx] = fold_predictions
-        scores[test_idx] = pipeline.decision_function(texts[test_idx].tolist())
+        fold_scores = pipeline.decision_function(texts[test_idx].tolist())
+        scores[test_idx] = fold_scores
         folds.append(_fold_row(
             fold, train_idx, test_idx, labels, fold_predictions, train_predictions,
+            scores=fold_scores, groups=groups, grouped=grouped,
         ))
         _report_training_progress(progress_callback, "fold_completed", fold)
     _report_training_progress(progress_callback, "refit_started", 5)
@@ -469,11 +523,21 @@ def train_remote_embedding_classifier(
             raw = classifier.predict_proba(features[test_idx])
             for column, label in enumerate(classifier.classes_.astype(int)):
                 probabilities[test_idx, TRAINING_LABEL_INDEX[label]] = raw[:, column]
+            fold_sums = probabilities[test_idx].sum(axis=1, keepdims=True)
+            if np.any(fold_sums <= 0):
+                raise ValueError(f"第 {fold} 折未能生成有效分类概率")
+            probabilities[test_idx] = probabilities[test_idx] / fold_sums
             scores[test_idx] = probabilities[test_idx]
+            fold_scores = probabilities[test_idx].copy()
+            fold_probabilities = probabilities[test_idx].copy()
         else:
-            scores[test_idx] = classifier.decision_function(features[test_idx])
+            fold_scores = classifier.decision_function(features[test_idx])
+            scores[test_idx] = fold_scores
+            fold_probabilities = None
         folds.append(_fold_row(
             fold, train_idx, test_idx, labels, fold_predictions, train_predictions,
+            scores=fold_scores, probabilities=fold_probabilities,
+            groups=groups, grouped=grouped,
         ))
         _report_training_progress(progress_callback, "fold_completed", fold)
 

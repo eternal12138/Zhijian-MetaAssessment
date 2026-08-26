@@ -1,4 +1,4 @@
-"""任务路由 —— 教师发布 / 学生查看"""
+"""固定协议任务只读查询；动态创建和发布入口已退役。"""
 import json
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -12,6 +12,11 @@ from app.schemas.task import TaskCreate, TaskOut, TaskPublish
 from app.core.security import get_current_user, require_role
 
 router = APIRouter(prefix="/tasks", tags=["测评任务"])
+
+FIXED_PROTOCOL_DETAIL = {
+    "code": "FIXED_PROTOCOL_TASKS",
+    "message": "当前版本采用固定测评协议，任务仅可通过受版本控制的协议配置维护",
+}
 
 
 @router.get("", response_model=list[TaskOut])
@@ -71,6 +76,7 @@ async def create_task(
     db: AsyncSession = Depends(get_db),
 ):
     """创建新任务"""
+    raise HTTPException(status_code=status.HTTP_410_GONE, detail=FIXED_PROTOCOL_DETAIL)
     task = AssessmentTask(
         title=data.title,
         subject=data.subject,
@@ -111,6 +117,7 @@ async def publish_task(
     db: AsyncSession = Depends(get_db),
 ):
     """发布任务"""
+    raise HTTPException(status_code=status.HTTP_410_GONE, detail=FIXED_PROTOCOL_DETAIL)
     result = await db.execute(
         select(AssessmentTask)
         .where(AssessmentTask.id == task_id)
