@@ -28,6 +28,8 @@ The application provides dedicated student, teacher, and administrator experienc
 
 > [!IMPORTANT]
 > This project is intended for academic research and formative assessment. It is not a medical device or clinical diagnostic tool. Reports must not be used for diagnosis, high-stakes screening, education or employment decisions, or as a replacement for validated professional psychometrics.
+>
+> ***This repository is currently intended solely for review and academic exchange by the organizing committee of the 2026 “Houcan Cup” National College Student Psychological and Cognitive Intelligent Assessment Challenge.*** 
 
 ## ✨ Key Features
 
