@@ -6,7 +6,9 @@
 
 <div align="center">
   <a href="https://github.com/eternal12138/Zhijian-MetaAssessment/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/eternal12138/Zhijian-MetaAssessment/ci.yml?branch=main&label=CI&logo=github&style=for-the-badge" alt="CI status" /></a>
-  <a href="LICENSE"><img src="https://img.shields.io/github/license/eternal12138/Zhijian-MetaAssessment?style=for-the-badge" alt="License" /></a>
+  <a href="LICENSE">
+  <img src="https://img.shields.io/badge/License-AGPL--3.0-blue?style=for-the-badge" alt="AGPL-3.0 License" />
+</a>
   <a href="https://www.python.org/"><img src="https://img.shields.io/badge/Python-3.13-3776AB?logo=python&logoColor=white&style=for-the-badge" alt="Python 3.13" /></a>
   <a href="https://vuejs.org/"><img src="https://img.shields.io/badge/Vue.js-3-42B883?logo=vuedotjs&logoColor=white&style=for-the-badge" alt="Vue 3" /></a>
   <a href="https://www.docker.com/"><img src="https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker&logoColor=white&style=for-the-badge" alt="Docker Compose" /></a>
