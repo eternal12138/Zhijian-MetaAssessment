@@ -8,7 +8,9 @@ from unittest.mock import AsyncMock, patch
 from fastapi import HTTPException
 from pydantic import ValidationError
 
-from app.api.extraction import _candidate_snapshot, _is_low_risk, _require_review_lock
+from app.api.extraction import (
+    _candidate_review_csv, _candidate_snapshot, _is_low_risk, _require_review_lock,
+)
 from app.core.time import utc_now_naive
 from app.models.extraction import ExtractionCandidate
 from app.schemas.extraction import ExtractionBatchRerunIn, ExtractionJobStatusBatchIn
@@ -72,6 +74,46 @@ class CandidateReviewEfficiencyTests(unittest.TestCase):
         self.assertEqual(snapshot["review_status"], "accepted")
         self.assertEqual(snapshot["review_note"], "人工确认")
         self.assertEqual(snapshot["started_at_ms"], 1000)
+
+    def test_final_review_export_contains_decision_and_provenance(self):
+        candidate = SimpleNamespace(
+            id="candidate-1", sequence_no=1, source_type="llm",
+            review_status="accepted", original_text="原始证据",
+            clean_text="=HYPERLINK(\"https://example.invalid\")", review_note="已核对录音",
+            reviewer_id="reviewer-1", reviewed_at="2026-08-27 10:00:00",
+            source_transcript_segment_id="segment-1", started_at_ms=1000,
+            ended_at_ms=2600, predicted_label=1,
+            predicted_dimension="monitoring", prediction_confidence=0.91,
+            classifier_version="model-v1", prediction_source="remote_embedding",
+            classification_status="classified", classification_error="",
+        )
+        pending = SimpleNamespace(**vars(candidate))
+        pending.id = "candidate-2"
+        pending.sequence_no = 2
+        pending.review_status = "pending"
+        pending.reviewer_id = None
+        pending.reviewed_at = None
+        content = _candidate_review_csv(
+            session=SimpleNamespace(id="session-1", run_id="run-1"),
+            owner=SimpleNamespace(id="student-1", name="测试学生", username="student001"),
+            task=SimpleNamespace(id="task-1", title="投球机任务"),
+            version=SimpleNamespace(
+                id="transcript-1", version_no=2, source="human_corrected",
+            ),
+            job=SimpleNamespace(
+                id="job-1", generation_no=3, model="extractor-model",
+                extractor_version="2026.2", prompt_version="prompt-v4", status="reviewing",
+            ),
+            rows=[(candidate, "复核教师"), (pending, None)],
+        )
+        self.assertTrue(content.startswith("\ufeff"))
+        self.assertIn("人工复核结论", content)
+        self.assertIn("accepted", content)
+        self.assertIn("'=HYPERLINK", content)
+        self.assertIn("human_corrected", content)
+        self.assertIn("复核教师", content)
+        self.assertIn("否（未完成快照）", content)
+        self.assertIn("pending", content)
 
     def test_batch_rerun_requires_unique_bounded_session_ids(self):
         payload = ExtractionBatchRerunIn(session_ids=["session-b", "session-a"])

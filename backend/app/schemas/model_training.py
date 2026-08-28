@@ -74,6 +74,20 @@ class TrainingSuiteCreate(BaseModel):
         return value
 
 
+class TrainingJobsDeleteIn(BaseModel):
+    job_ids: list[str] = Field(min_length=1, max_length=100)
+
+    @field_validator("job_ids")
+    @classmethod
+    def validate_job_ids(cls, value: list[str]) -> list[str]:
+        normalized = [job_id.strip() for job_id in value]
+        if any(not job_id for job_id in normalized):
+            raise ValueError("训练任务 ID 不能为空")
+        if len(normalized) != len(set(normalized)):
+            raise ValueError("训练任务不能重复选择")
+        return normalized
+
+
 class TrainingDatasetOut(BaseModel):
     id: str
     name: str

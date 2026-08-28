@@ -8,7 +8,10 @@ from app.models.session import (
     AssessmentSession, DialogueTurn, CodedSegment,
     AudioChunk, TranscriptSegment, InteractionEvent,
 )
-from app.models.report import MetacognitiveProfile, LearningSuggestion, ConsistencyReport
+from app.models.report import (
+    MetacognitiveProfile, MetacognitionMeasurement, MeasurementCorrection,
+    LearningSuggestion, ConsistencyReport,
+)
 from app.models.protocol import AssessmentRun, QuestionnaireResponse, TaskOrderAssignment
 from app.models.notification import Notification
 from app.models.system_config import SystemConfig, SystemConfigHistory
@@ -30,7 +33,7 @@ __all__ = [
     "ScaleDimensionGroup", "ScaleItem",
     "AssessmentSession", "DialogueTurn", "CodedSegment",
     "AudioChunk", "TranscriptSegment", "InteractionEvent",
-    "MetacognitiveProfile", "LearningSuggestion", "ConsistencyReport",
+    "MetacognitiveProfile", "MetacognitionMeasurement", "MeasurementCorrection", "LearningSuggestion", "ConsistencyReport",
     "AssessmentRun", "QuestionnaireResponse", "TaskOrderAssignment",
     "Notification",
     "SystemConfig", "SystemConfigHistory",

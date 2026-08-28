@@ -90,10 +90,6 @@ export const protocolApi = {
     return apiClient.get<AssessmentRun | null>('/assessment/runs/current')
   },
 
-  getRun(runId: string) {
-    return apiClient.get<AssessmentRun>(`/assessment/runs/${runId}`)
-  },
-
   advanceStage(runId: string, stage: string) {
     return apiClient.patch<AssessmentRun>(`/assessment/runs/${runId}/stage`, { stage })
   },

@@ -3,7 +3,7 @@
 """
 import uuid
 from datetime import datetime
-from sqlalchemy import String, Text, Integer, Float, DateTime, ForeignKey, func, JSON
+from sqlalchemy import Boolean, String, Text, Integer, Float, DateTime, ForeignKey, func, JSON, Index
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.database import Base
 
@@ -45,6 +45,81 @@ class MetacognitiveProfile(Base):
     )
     session: Mapped["AssessmentSession"] = relationship(back_populates="report")
     suggestions: Mapped[list["LearningSuggestion"]] = relationship(back_populates="profile", cascade="all, delete-orphan")
+
+
+class MetacognitionMeasurement(Base):
+    """Traceable run- or task-scoped behavioral proportion snapshot."""
+
+    __tablename__ = "metacognition_measurements"
+    __table_args__ = (
+        Index(
+            "uq_metacognition_measurement_scope",
+            "run_id", "scope_key",
+            unique=True,
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(
+        String(36), primary_key=True, default=lambda: str(uuid.uuid4())
+    )
+    user_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("users.id"), nullable=False, index=True
+    )
+    run_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("assessment_runs.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    scope_type: Mapped[str] = mapped_column(String(16), nullable=False, default="run")
+    scope_key: Mapped[str] = mapped_column(String(64), nullable=False, default="run")
+    task_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey(
+            "assessment_tasks.id",
+            ondelete="CASCADE",
+            name="fk_metacognition_measurement_task",
+        ),
+        nullable=True, index=True,
+    )
+    task_ids: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    effective_dialogue_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    monitoring_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    control_debugging_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    evaluation_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    monitoring_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    control_debugging_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    evaluation_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    score_available: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    source: Mapped[str] = mapped_column(String(32), nullable=False, default="none")
+    data_version: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    calculated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
+    completed_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+
+class MeasurementCorrection(Base):
+    """Immutable admin-uploaded, complete reviewed dialogue set for one session."""
+
+    __tablename__ = "measurement_corrections"
+    __table_args__ = (
+        Index("uq_measurement_correction_version", "session_id", "version_no", unique=True),
+        {"mysql_charset": "utf8mb4", "mysql_collate": "utf8mb4_unicode_ci"},
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    session_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("assessment_sessions.id", ondelete="CASCADE"), index=True,
+    )
+    uploaded_by: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="SET NULL"), nullable=True,
+    )
+    filename: Mapped[str] = mapped_column(String(255), nullable=False)
+    file_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    dialogues: Mapped[list[dict]] = mapped_column(JSON, nullable=False)
+    dimension_counts: Mapped[dict] = mapped_column(JSON, nullable=False)
+    effective_dialogue_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    version_no: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
 
 
 class LearningSuggestion(Base):

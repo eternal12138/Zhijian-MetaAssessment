@@ -1,7 +1,10 @@
 """Complete assessment reports, evidence coding, and human review."""
 import json
+import hashlib
+import uuid
+from pathlib import PurePosixPath
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Response, UploadFile, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -9,18 +12,24 @@ from sqlalchemy.orm import selectinload
 from app.core.security import can_access_user, get_current_user, require_role
 from app.database import get_db
 from app.models.protocol import AssessmentRun
-from app.models.report import MetacognitiveProfile
-from app.models.session import AssessmentSession, CodedSegment
+from app.models.report import MetacognitiveProfile, MetacognitionMeasurement, MeasurementCorrection
+from app.models.session import AssessmentSession
+from app.models.research import AuditLog
+from app.core.time import utc_now_naive
+from app.services.measurement_corrections import MAX_UPLOAD_BYTES, parse_correction_csv, correction_counts
+from app.models.task import AssessmentTask
 from app.models.user import User
 from app.schemas.report import (
-    CodingReviewIn,
-    CodingReviewOut,
     ReportBriefOut,
     ReportGenerateIn,
     ReportOut,
+    MetacognitionMeasurementOut,
+    MetacognitionMeasurementPageOut,
 )
+from app.services.metacognition_measurement import calculate_and_persist_measurement
+from app.services.metacognition_evidence import load_session_evidence
 from app.services.report_analyzer import generate_run_report
-from app.services.notifications import create_notification, notify_reviewers
+from app.services.notifications import notify_reviewers
 
 router = APIRouter(prefix="/reports", tags=["报告"])
 
@@ -105,6 +114,112 @@ def _ensure_report_visible_to_user(
         raise HTTPException(status_code=404, detail="报告尚未发布")
 
 
+def _ensure_measurement_owned_by_student(run: AssessmentRun, user: User) -> None:
+    if run.user_id != user.id:
+        raise HTTPException(status_code=403, detail="无权查看其他学生的测量结果")
+
+
+async def _measurement_out(
+    measurement: MetacognitionMeasurement,
+    db: AsyncSession,
+) -> MetacognitionMeasurementOut:
+    task_ids = list(measurement.task_ids or [])
+    tasks = list((await db.scalars(
+        select(AssessmentTask).where(AssessmentTask.id.in_(task_ids))
+    )).all()) if task_ids else []
+    task_name_by_id = {task.id: task.title for task in tasks}
+    return MetacognitionMeasurementOut(
+        id=measurement.id,
+        user_id=measurement.user_id,
+        run_id=measurement.run_id,
+        scope_type=measurement.scope_type,
+        scope_key=measurement.scope_key,
+        task_id=measurement.task_id,
+        task_name=(task_name_by_id.get(measurement.task_id) if measurement.task_id else None),
+        task_ids=task_ids,
+        task_names=[task_name_by_id.get(task_id, "未知任务") for task_id in task_ids],
+        effective_dialogue_count=measurement.effective_dialogue_count,
+        denominator_breakdown=getattr(measurement, "denominator_breakdown", {}),
+        fallback_dialogue_count=getattr(measurement, "fallback_dialogue_count", 0),
+        unclassified_count=getattr(measurement, "unclassified_count", 0),
+        dimension_counts={
+            "monitoring": measurement.monitoring_count,
+            "control_debugging": measurement.control_debugging_count,
+            "evaluation": measurement.evaluation_count,
+        },
+        dimension_scores={
+            "monitoring": measurement.monitoring_score,
+            "control_debugging": measurement.control_debugging_score,
+            "evaluation": measurement.evaluation_score,
+        },
+        score_available=measurement.score_available,
+        source=measurement.source,
+        data_version=measurement.data_version,
+        calculated_at=measurement.calculated_at,
+        completed_at=measurement.completed_at,
+    )
+
+
+@router.get("/measurement-corrections/template")
+async def measurement_correction_template(user: User = Depends(require_role("admin"))):
+    return Response(
+        "\ufeff会话ID,校对文本,最终标签\r\n",
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": 'attachment; filename="measurement-correction-template.csv"'},
+    )
+
+
+@router.post("/measurement-corrections")
+async def upload_measurement_corrections(
+    file: UploadFile = File(...), confirmed: bool = Form(False),
+    user: User = Depends(require_role("admin")), db: AsyncSession = Depends(get_db),
+):
+    # Also enforced here for direct calls; teacher/student cannot upload by API.
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail="仅管理员可以上传校对结果")
+    if not confirmed:
+        raise HTTPException(status_code=422, detail="请确认文件包含每个所列会话的完整有效对话及最终标签")
+    if not (file.filename or "").lower().endswith(".csv"):
+        raise HTTPException(status_code=422, detail="请使用 UTF-8 CSV 校对模板")
+    content = await file.read(MAX_UPLOAD_BYTES + 1)
+    try:
+        grouped = parse_correction_csv(content)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    # Validate the whole upload before writing anything. Lock sessions to serialize
+    # concurrent corrections and give versions an unambiguous chronological order.
+    sessions = list((await db.scalars(select(AssessmentSession).join(
+        AssessmentRun, AssessmentRun.id == AssessmentSession.run_id,
+    ).where(
+        AssessmentSession.id.in_(grouped), AssessmentRun.status == "completed",
+        AssessmentRun.completed_at.is_not(None),
+    ).order_by(AssessmentSession.id).with_for_update())).all())
+    if {s.id for s in sessions} != set(grouped):
+        raise HTTPException(status_code=422, detail="存在未知会话ID或尚未完成的测评；整个文件未导入")
+    now = utc_now_naive()
+    versions = []
+    for session in sessions:
+        version_no = int(await db.scalar(select(func.max(MeasurementCorrection.version_no)).where(
+            MeasurementCorrection.session_id == session.id,
+        )) or 0) + 1
+        row = MeasurementCorrection(
+            id=str(uuid.uuid4()), session_id=session.id, uploaded_by=user.id,
+            version_no=version_no,
+            filename=PurePosixPath((file.filename or "").replace("\\", "/")).name[:255],
+            file_sha256=hashlib.sha256(content).hexdigest(), dialogues=grouped[session.id],
+            dimension_counts=correction_counts(grouped[session.id]),
+            effective_dialogue_count=len(grouped[session.id]), created_at=now,
+        )
+        db.add(row)
+        versions.append(row.id)
+    db.add(AuditLog(
+        actor_id=user.id, action="measurement_correction_upload", target_type="measurement_correction",
+        detail={"version_ids": versions, "session_ids": list(grouped), "row_count": sum(map(len, grouped.values()))},
+    ))
+    await db.flush()
+    return {"session_count": len(sessions), "dialogue_count": sum(map(len, grouped.values())), "version_ids": versions}
+
+
 @router.get("", response_model=list[ReportBriefOut])
 async def list_reports(
     user: User = Depends(get_current_user),
@@ -122,6 +237,69 @@ async def list_reports(
         statement.order_by(MetacognitiveProfile.generated_at.desc())
     )
     return [ReportBriefOut.model_validate(report) for report in result.scalars().all()]
+
+
+@router.get(
+    "/metacognition-measurements",
+    response_model=MetacognitionMeasurementPageOut,
+)
+async def list_metacognition_measurements(
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+    user: User = Depends(require_role("student")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Return the current student's completed runs in authoritative time order."""
+    base_filter = (
+        AssessmentRun.user_id == user.id,
+        AssessmentRun.status == "completed",
+        AssessmentRun.completed_at.is_not(None),
+    )
+    total = int(await db.scalar(
+        select(func.count(AssessmentRun.id)).where(*base_filter)
+    ) or 0)
+    runs = list((await db.scalars(
+        select(AssessmentRun)
+        .where(*base_filter)
+        .order_by(AssessmentRun.completed_at.desc(), AssessmentRun.id.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    )).all())
+    session_evidence = await load_session_evidence([run.id for run in runs], db)
+    items = [
+        await _measurement_out(await calculate_and_persist_measurement(run, db, session_evidence=session_evidence), db)
+        for run in runs
+    ]
+    return MetacognitionMeasurementPageOut(
+        items=items,
+        page=page,
+        page_size=page_size,
+        total=total,
+    )
+
+
+@router.get(
+    "/metacognition-measurements/{run_id}",
+    response_model=MetacognitionMeasurementOut,
+)
+async def get_metacognition_measurement(
+    run_id: str,
+    task_id: str | None = Query(default=None),
+    user: User = Depends(require_role("student")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Return one own-run measurement; the ownership check prevents IDOR."""
+    run = await db.get(AssessmentRun, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="完整测评不存在")
+    _ensure_measurement_owned_by_student(run, user)
+    if run.status != "completed" or run.completed_at is None:
+        raise HTTPException(status_code=409, detail="完整测评尚未结束")
+    try:
+        measurement = await calculate_and_persist_measurement(run, db, task_id=task_id)
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    return await _measurement_out(measurement, db)
 
 
 @router.post("/runs/{run_id}/generate", response_model=ReportOut)
@@ -176,79 +354,23 @@ async def get_report_by_run(
     return _report_out(report)
 
 
-@router.get("/review/pending", response_model=list[CodingReviewOut])
+@router.get("/review/pending")
 async def list_pending_codings(
-    response: Response,
-    page: int = Query(default=1, ge=1),
-    page_size: int = Query(default=20, ge=10, le=100),
     user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
 ):
-    """教师或管理员查看低置信度、尚未人工确认的编码片段。"""
+    """Retired single-review queue retained as an explicit tombstone."""
+    del user
     raise HTTPException(status_code=status.HTTP_410_GONE, detail=LEGACY_REVIEW_DETAIL)
-    if user.role not in {"teacher", "admin"}:
-        raise HTTPException(status_code=403, detail="仅教师或管理员可进行人工复核")
-    statement = (
-        select(CodedSegment, User)
-        .join(AssessmentSession, AssessmentSession.id == CodedSegment.session_id)
-        .join(User, User.id == AssessmentSession.user_id)
-        .where(
-            CodedSegment.needs_review.is_(True),
-            CodedSegment.human_score.is_(None),
-        )
-    )
-    rows = [row for row in (await db.execute(statement)).all() if can_access_user(user, row[1])]
-    response.headers["X-Total-Count"] = str(len(rows))
-    start = (page - 1) * page_size
-    return [CodingReviewOut.model_validate(code) for code, _ in rows[start:start + page_size]]
 
 
-@router.patch("/codings/{coding_id}", response_model=CodingReviewOut)
+@router.patch("/codings/{coding_id}")
 async def review_coding(
     coding_id: str,
-    data: CodingReviewIn,
     user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
 ):
-    """保存人工评分；人工分数在报告聚合时优先于 AI 分数。"""
+    """Retired single-review write endpoint retained as a tombstone."""
+    del coding_id, user
     raise HTTPException(status_code=status.HTTP_410_GONE, detail=LEGACY_REVIEW_DETAIL)
-    if user.role not in {"teacher", "admin"}:
-        raise HTTPException(status_code=403, detail="仅教师或管理员可进行人工复核")
-    result = await db.execute(
-        select(CodedSegment)
-        .where(CodedSegment.id == coding_id)
-        .options(selectinload(CodedSegment.session))
-    )
-    coding = result.scalar_one_or_none()
-    if coding is None:
-        raise HTTPException(status_code=404, detail="编码片段不存在")
-    owner = await db.get(User, coding.session.user_id)
-    if owner is None or not can_access_user(user, owner):
-        raise HTTPException(status_code=403, detail="无权复核该学生的编码")
-
-    coding.human_score = data.human_score
-    coding.review_note = data.review_note.strip()
-    coding.needs_review = False
-    await db.flush()
-    if coding.session.run_id:
-        await generate_run_report(coding.session.run_id, db, reanalyze=False)
-        await create_notification(
-            db,
-            user_id=coding.session.user_id,
-            type="report",
-            title="报告复核处理中",
-            content=(
-                "初步人工复核已完成，仍需完成研究审核与发布；"
-                "正式发布后系统会再次通知你。"
-            ),
-            target_url=f"/report?run={coding.session.run_id}",
-            event_key=f"coding-reviewed:{coding.id}:{coding.session.user_id}",
-            metadata={
-                "run_id": coding.session.run_id,
-                "coding_id": coding.id,
-            },
-        )
-    return CodingReviewOut.model_validate(coding)
 
 
 @router.get("/{report_id}", response_model=ReportOut)

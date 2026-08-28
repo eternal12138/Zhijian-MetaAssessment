@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
-import RadarChart from '../components/charts/RadarChart.vue'
 import StatCard from '../components/dashboard/StatCard.vue'
 import PlanetOrbitHero from '../components/dashboard/PlanetOrbitHero.vue'
 import MacroAnalyticsDashboard from '../components/dashboard/MacroAnalyticsDashboard.vue'
@@ -122,15 +121,14 @@ onMounted(async () => {
           <div class="panel-head">
             <div>
               <p class="panel-kicker">最近一次测评</p>
-              <h2>我的元认知画像</h2>
+              <h2>最近发布的综合报告</h2>
             </div>
             <RouterLink to="/report" class="panel-action-link">
               查看报告 <i class="bi bi-arrow-up-right"></i>
             </RouterLink>
           </div>
 
-          <div v-if="report" class="radar-wrap">
-            <RadarChart :scores="report.dimensions" :show-norm="false" />
+          <div v-if="report" class="report-summary-wrap">
             <div class="score-note">
               <span>综合表现</span>
               <strong>{{ report.level }}</strong>
@@ -142,8 +140,8 @@ onMounted(async () => {
             <div class="empty-icon-circle">
               <i class="bi bi-file-earmark-bar-graph"></i>
             </div>
-            <p class="empty-title">暂未发布测评画像</p>
-            <p class="empty-desc">出声思维测评完成并经研究复核发布后，多维元认知画像与能力雷达图将在此展示。</p>
+            <p class="empty-title">暂未发布综合报告</p>
+            <p class="empty-desc">三维测量画像会在上方依据最终有效对话独立显示；综合报告需经研究复核发布后才可查看。</p>
           </div>
         </article>
 

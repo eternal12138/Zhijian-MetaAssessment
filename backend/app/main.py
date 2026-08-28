@@ -1,7 +1,6 @@
 """
 知见 AI 元认知测评 —— FastAPI 主入口（全链路加固增强版）
 """
-import asyncio
 import logging
 import time
 import os
@@ -11,7 +10,7 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
-from sqlalchemy import text, select
+from sqlalchemy import text
 
 from app.config import get_settings
 from app.database import AsyncSessionLocal, init_db
@@ -33,36 +32,6 @@ START_TIME = time.time()
 
 
 
-async def _in_process_export_worker() -> None:
-    """常驻后台协程：自动扫描并执行云端环境中因服务重启或未及时触发的 queued 导出任务。"""
-    logger.info("启动内建数据导出后台任务处理引擎...")
-    while True:
-        try:
-            async with AsyncSessionLocal() as db:
-                queued_job = await db.scalar(
-                    select(research.ExportJob)
-                    .where(
-                        research.ExportJob.export_type == "audio_transcript_zip",
-                        research.ExportJob.status == "queued",
-                    )
-                    .order_by(research.ExportJob.created_at.asc())
-                    .limit(1)
-                )
-                if queued_job is not None:
-                    job_id = queued_job.id
-                    user_id = queued_job.requested_by
-                    logger.info("内建导出引擎认领并启动任务 %s (用户 %s)", job_id, user_id)
-                    queued_job.status = "preparing"
-                    queued_job.progress = 1
-                    await db.commit()
-                    asyncio.create_task(research._run_audio_transcript_export(job_id, user_id))
-            await asyncio.sleep(2)
-        except asyncio.CancelledError:
-            break
-        except Exception as e:
-            logger.warning("内建导出引擎扫描异常: %s", e)
-            await asyncio.sleep(5)
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期：尝试连接数据库并初始化表"""
@@ -83,15 +52,8 @@ async def lifespan(app: FastAPI):
         logger.info("运行时模型服务配置已加载")
     except Exception as e:
         logger.warning("运行时模型服务配置加载失败，将使用环境变量：%s", e)
-    export_worker_task = asyncio.create_task(_in_process_export_worker())
-    try:
-        yield
-    finally:
-        export_worker_task.cancel()
-        try:
-            await export_worker_task
-        except asyncio.CancelledError:
-            pass
+    # 导出只由独立工作进程加锁认领，防止与 API 同时写入同一 ZIP。
+    yield
 
 
 app = FastAPI(

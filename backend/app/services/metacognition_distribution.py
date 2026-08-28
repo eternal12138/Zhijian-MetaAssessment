@@ -1,9 +1,7 @@
 """Privacy-safe aggregation of three-class metacognitive evidence.
 
-The radar chart represents composition, not a psychological score: monitoring,
-regulation and evaluation counts are divided by their three-class total.  A
-resolved expert result is authoritative for a run; model classifications are
-used only when that run has no resolved expert units.
+The radar divides label hits by final effective dialogues. Only scopes without
+reviewed or admin-corrected dialogues fall back to the three-class label total.
 """
 
 from __future__ import annotations
@@ -76,17 +74,25 @@ def aggregate_distribution(
     counts = empty_counts()
     sources: set[str] = set()
     contributing_runs = 0
+    denominator = 0
+    denominator_sources: dict[str, int] = {}
+    unclassified_count = 0
     for run_id in dict.fromkeys(str(value) for value in run_ids if value):
         row = resolved_by_run.get(run_id)
-        if not row:
+        if not row or int(row.get("effective_dialogue_count", sum(row["counts"].values()))) <= 0:
             continue
         contributing_runs += 1
         sources.add(str(row["source"]))
+        row_denominator = int(row.get("effective_dialogue_count", sum(row["counts"].values())))
+        denominator += row_denominator
+        unclassified_count += int(row.get("unclassified_count", 0))
+        for name, value in row.get("denominator_breakdown", {"label_total_fallback": row_denominator}).items():
+            denominator_sources[name] = denominator_sources.get(name, 0) + int(value)
         for dimension, _dimension_label in DIMENSIONS:
             counts[dimension] += int(row["counts"].get(dimension, 0))
     total = sum(counts.values())
     percentages = {
-        dimension: round(count / total * 100, 1) if total else 0.0
+        dimension: round(count / denominator * 100, 1) if denominator else 0.0
         for dimension, count in counts.items()
     }
     source = (
@@ -98,6 +104,11 @@ def aggregate_distribution(
         "counts": counts,
         "percentages": percentages,
         "total": total,
+        "effective_dialogue_count": denominator,
+        "denominator_breakdown": denominator_sources,
+        "fallback_dialogue_count": denominator_sources.get("label_total_fallback", 0),
+        "unclassified_count": unclassified_count,
+        "score_available": denominator > 0 and (total > 0 or unclassified_count == 0),
         "sample_count": contributing_runs,
         "primary_source": source,
         "scores": [
@@ -108,6 +119,5 @@ def aggregate_distribution(
                 "max": 100,
             }
             for dimension, dimension_label in DIMENSIONS
-        ] if total else [],
+        ] if denominator > 0 and (total > 0 or unclassified_count == 0) else [],
     }
-

@@ -49,49 +49,6 @@ class AnalysisJobOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
-class ReviewAssignmentOut(BaseModel):
-    coding_id: str
-    session_id: str
-    run_id: str | None
-    task_id: str
-    segment: str
-    ai_dimension: str | None
-    ai_score: int | None
-    ai_reason: str
-    ai_confidence: float
-    completed_reviews: int
-
-
-class AnnotationIn(BaseModel):
-    dimension: str | None = Field(
-        default=None,
-        pattern="^(NON_META|MONITORING|REGULATION|EVALUATION|monitoring|controlDebugging|evaluation)$",
-    )
-    score: int | None = Field(default=None, ge=1, le=7)
-    note: str = Field(default="", max_length=2000)
-
-
-class AnnotationOut(BaseModel):
-    id: str
-    coding_id: str
-    reviewer_id: str
-    dimension: str | None
-    score: int | None
-    note: str
-    created_at: datetime
-    model_config = {"from_attributes": True}
-
-
-class DisagreementOut(BaseModel):
-    coding_id: str
-    segment: str
-    annotations: list[dict]
-
-
-class AdjudicationIn(AnnotationIn):
-    pass
-
-
 class CodingReviewerOut(BaseModel):
     id: str
     username: str

@@ -5,7 +5,6 @@ from pydantic import ValidationError
 from sqlalchemy import BigInteger
 
 from app.api.auth import register, skip_password_change
-from app.api.sessions import ChatRequest
 from app.config import Settings
 from app.core.security import can_access_user, decode_token, is_password_action_path
 from app.models.session import DialogueTurn
@@ -169,10 +168,6 @@ class SecurityRulesTest(unittest.IsolatedAsyncioTestCase):
             _env_file=None,
         )
         self.assertIn("p%40ss%3A%2F%3F%23+value", settings.database_url)
-
-    def test_chat_requires_nonempty_session_and_message(self):
-        with self.assertRaises(ValidationError):
-            ChatRequest(session_id="", message="")
 
     def test_dialogue_timestamp_uses_big_integer(self):
         column_type = DialogueTurn.__table__.c.timestamp.type

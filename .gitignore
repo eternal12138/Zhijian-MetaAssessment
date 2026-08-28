@@ -64,6 +64,7 @@ htmlcov/
 *.tmp
 *.part
 *.zip
+*.zip.sha256
 metacognition-deploy-*.zip
 
 # Editors and operating systems

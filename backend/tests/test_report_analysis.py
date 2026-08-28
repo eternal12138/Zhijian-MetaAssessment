@@ -1,10 +1,11 @@
 import unittest
 
-from pydantic import ValidationError
-
 from app.models.session import CodedSegment, TranscriptSegment
-from app.schemas.report import CodingReviewIn
-from app.services.report_analyzer import _normalize, _rule_codes
+from app.services.report_analyzer import (
+    _fallback_behavior_score,
+    _normalize,
+    _rule_codes,
+)
 
 
 class ReportAnalysisTest(unittest.TestCase):
@@ -35,11 +36,18 @@ class ReportAnalysisTest(unittest.TestCase):
         )
         self.assertTrue(all(1 <= item["score"] <= 7 for item in codes))
 
-    def test_human_review_score_is_limited_to_one_through_seven(self):
-        with self.assertRaises(ValidationError):
-            CodingReviewIn(human_score=0)
-        with self.assertRaises(ValidationError):
-            CodingReviewIn(human_score=8)
+    def test_legacy_human_score_cannot_override_report_fallback(self):
+        code = CodedSegment(
+            id="coding-1",
+            session_id="session-1",
+            segment="测试片段",
+            score=2,
+            human_score=7,
+            reason="自动编码",
+            confidence=0.8,
+        )
+
+        self.assertEqual(_fallback_behavior_score(code), 2.0)
 
     def test_transcript_coding_no_longer_requires_dialogue_turn(self):
         self.assertTrue(CodedSegment.__table__.c.turn_id.nullable)

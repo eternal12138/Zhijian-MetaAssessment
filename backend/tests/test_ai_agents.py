@@ -2,57 +2,10 @@ import json
 import unittest
 from types import SimpleNamespace
 
-from app.api.sessions import ChatRequest
 from app.services.analysis_agent import (
     AnalysisAgent,
     AnalysisSegment,
 )
-from app.services.protocol_agent import (
-    NEUTRAL_PROMPTS,
-    ProtocolAgent,
-    ProtocolEvent,
-)
-
-
-class ProtocolAgentTest(unittest.TestCase):
-    def setUp(self):
-        self.agent = ProtocolAgent()
-
-    def test_participant_turn_never_triggers_an_automatic_reply(self):
-        decision = self.agent.handle(ProtocolEvent.PARTICIPANT_TURN)
-
-        self.assertFalse(decision.should_respond)
-        self.assertIsNone(decision.message)
-
-    def test_silence_reminders_are_limited_to_the_four_protocol_prompts(self):
-        generated = [
-            self.agent.handle(ProtocolEvent.SILENCE_REMINDER, reminder_index=index)
-            for index in range(8)
-        ]
-
-        self.assertEqual(
-            [item.message for item in generated],
-            list(NEUTRAL_PROMPTS) * 2,
-        )
-        self.assertTrue(all(item.should_respond for item in generated))
-        self.assertTrue(all(
-            self.agent.is_allowed_formal_task_message(item.message or "")
-            for item in generated
-        ))
-        self.assertFalse(
-            self.agent.is_allowed_formal_task_message("你为什么选择这种算法？")
-        )
-
-    def test_silence_event_does_not_require_a_fake_participant_message(self):
-        request = ChatRequest(
-            session_id="session-1",
-            event=ProtocolEvent.SILENCE_REMINDER,
-            reminder_index=2,
-        )
-
-        self.assertEqual(request.message, "")
-
-
 class AnalysisAgentTest(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.segments = [

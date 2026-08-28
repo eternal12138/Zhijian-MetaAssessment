@@ -205,7 +205,8 @@ export interface ResearchDashboard {
     score: number
     status: string
     requires_review_count: number
-    double_review_pending: number
+    /** null means no authoritative fixed blinded-coding batch exists yet. */
+    double_review_pending: number | null
     quality_status: string
     generated_at: string
   }>
@@ -246,7 +247,7 @@ export interface MacroAnalytics {
     }
   }
   dimension_distribution: {
-    primary_source: 'expert_consensus' | 'production_model' | 'hybrid' | 'none'
+    primary_source: 'expert_consensus' | 'production_model' | 'admin_upload' | 'hybrid' | 'none'
     counts: Record<'monitoring' | 'controlDebugging' | 'evaluation', number>
     total: number
     expert_consensus_total: number
@@ -267,8 +268,13 @@ export interface MacroRadarProfile {
   counts: Record<'monitoring' | 'controlDebugging' | 'evaluation', number>
   percentages: Record<'monitoring' | 'controlDebugging' | 'evaluation', number>
   total: number
+  effective_dialogue_count: number
+  denominator_breakdown: Record<string, number>
+  fallback_dialogue_count: number
+  unclassified_count: number
+  score_available: boolean
   sample_count: number
-  primary_source: 'expert_consensus' | 'production_model' | 'hybrid' | 'none'
+  primary_source: 'expert_consensus' | 'production_model' | 'admin_upload' | 'hybrid' | 'none'
   scores: Array<{
     dimension: 'monitoring' | 'controlDebugging' | 'evaluation'
     label: string
@@ -822,6 +828,21 @@ export const researchApi = {
   },
   listModelEvaluations() {
     return apiClient.get<ModelEvaluationIndex>('/research/model-training/evaluations')
+  },
+  deleteModelTrainingJob(jobId: string) {
+    return apiClient.delete<{
+      status: 'deleted'
+      job_id: string
+      version: string
+      artifact_removed: boolean
+    }>(`/research/model-training/jobs/${jobId}`)
+  },
+  deleteModelTrainingJobs(jobIds: string[]) {
+    return apiClient.post<{
+      status: 'deleted'
+      deleted_count: number
+      items: Array<{ status: 'deleted'; job_id: string; version: string; artifact_removed: boolean }>
+    }>('/research/model-training/jobs/batch-delete', { job_ids: jobIds })
   },
   activateModelTrainingJob(jobId: string) {
     return apiClient.post<ModelTrainingJob>(`/research/model-training/jobs/${jobId}/activate`)

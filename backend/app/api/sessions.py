@@ -1,22 +1,17 @@
-"""会话路由 —— 测评会话 CRUD + WebSocket + SSE"""
-import time
-import json
+"""会话路由 —— 固定协议测评会话与录音/转录采集。"""
 import asyncio
 import math
 import re
-from datetime import datetime
 from pathlib import Path
 from fastapi import (
     APIRouter, Depends, File, Form, HTTPException, UploadFile,
-    WebSocket, WebSocketDisconnect, status,
+    status,
 )
-from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field, model_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
 
-from app.database import AsyncSessionLocal, get_db
+from app.database import get_db
 from app.core.time import utc_now_naive
 from app.config import get_settings
 from app.models.user import User
@@ -26,14 +21,11 @@ from app.models.session import (
     AudioChunk, TranscriptSegment, InteractionEvent,
 )
 from app.schemas.session import (
-    SessionOut, SessionStart, AgentResponse,
-    DialogueTurnIn, DialogueTurnOut, CodedSegmentOut,
+    SessionOut, SessionStart, DialogueTurnOut, CodedSegmentOut,
     AudioChunkOut, TranscriptBatchIn, TranscriptSegmentOut,
     InteractionEventBatchIn, InteractionEventOut, SessionCompleteIn,
 )
-from app.core.security import can_access_user, decode_token, get_current_user
-from app.core.websocket import manager
-from app.services.protocol_agent import ProtocolEvent, protocol_agent
+from app.core.security import can_access_user, get_current_user
 from app.services.asr_service import ensure_asr_job
 from app.services.audio_manifest import AudioManifestError
 
@@ -51,20 +43,6 @@ ALLOWED_AUDIO_MIME_TYPES = {
     "audio/wav",
     "application/octet-stream",
 }
-
-# ---- 标准化主试请求体 ----
-class ChatRequest(BaseModel):
-    session_id: str = Field(min_length=1, max_length=64)
-    message: str = Field(default="", max_length=20_000)
-    event: ProtocolEvent = ProtocolEvent.PARTICIPANT_TURN
-    reminder_index: int = Field(default=0, ge=0)
-
-    @model_validator(mode="after")
-    def validate_event_payload(self):
-        if self.event is ProtocolEvent.PARTICIPANT_TURN and not self.message.strip():
-            raise ValueError("被试发言不能为空")
-        return self
-
 
 @router.post("", response_model=SessionOut, status_code=201)
 async def start_session(
@@ -108,99 +86,23 @@ async def start_session(
     )
 
 
-# ---- 标准化主试 SSE ----
-
 @router.post("/chat")
 async def chat_sse(
-    data: ChatRequest,
     user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
 ):
-    """记录被试发言；仅明确的静默提醒事件允许主试输出固定提示。"""
+    """Retired real-time dialogue endpoint retained as a tombstone."""
+    del user
     raise HTTPException(status_code=status.HTTP_410_GONE, detail=LEGACY_DIALOGUE_DETAIL)
-
-    if not SAFE_SESSION_ID.fullmatch(data.session_id):
-        raise HTTPException(status_code=400, detail="会话 ID 格式不合法")
-    session = await db.get(AssessmentSession, data.session_id)
-    if not session:
-        raise HTTPException(status_code=404, detail="会话不存在")
-    _ensure_session_owner(session, user)
-    if session.status == "completed":
-        raise HTTPException(status_code=409, detail="会话已结束")
-
-    message = data.message.strip()
-    if data.event is ProtocolEvent.PARTICIPANT_TURN and not message:
-        raise HTTPException(status_code=422, detail="被试发言不能为空")
-    decision = protocol_agent.handle(
-        data.event,
-        reminder_index=data.reminder_index,
-    )
-
-    async def generate():
-        try:
-            if data.event is ProtocolEvent.PARTICIPANT_TURN:
-                db.add(DialogueTurn(
-                    session_id=data.session_id,
-                    role="user",
-                    content=message,
-                    timestamp=int(time.time() * 1000),
-                ))
-
-            if decision.should_respond and decision.message:
-                db.add(DialogueTurn(
-                    session_id=data.session_id,
-                    role="agent",
-                    content=decision.message,
-                    timestamp=int(time.time() * 1000),
-                ))
-                chunk_data = {
-                    "content": decision.message,
-                    "event": decision.event.value,
-                    "prompt_index": decision.prompt_index,
-                }
-                yield f"data: {json.dumps(chunk_data, ensure_ascii=False)}\n\n"
-
-            await db.commit()
-            yield "data: [DONE]\n\n"
-        except Exception:
-            await db.rollback()
-            error_data = {"content": "", "error": "protocol_event_failed"}
-            yield f"data: {json.dumps(error_data, ensure_ascii=False)}\n\n"
-            yield "data: [DONE]\n\n"
-
-    return StreamingResponse(generate(), media_type="text/event-stream")
 
 
 @router.get("/{session_id}/history")
 async def get_session_history(
     session_id: str,
     user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
 ):
-    """获取当前用户的会话对话历史。"""
+    """Retired dialogue-history endpoint retained as a tombstone."""
+    del session_id, user
     raise HTTPException(status_code=status.HTTP_410_GONE, detail=LEGACY_DIALOGUE_DETAIL)
-    session = await db.get(AssessmentSession, session_id)
-    if not session:
-        raise HTTPException(status_code=404, detail="会话不存在")
-    session_owner = await db.get(User, session.user_id)
-    if session_owner is None or not can_access_user(user, session_owner):
-        raise HTTPException(status_code=403, detail="无权访问此会话")
-    result = await db.execute(
-        select(DialogueTurn)
-        .where(DialogueTurn.session_id == session_id)
-        .order_by(DialogueTurn.timestamp.asc())
-    )
-    turns = result.scalars().all()
-    return [
-        {
-            "id": t.id,
-            "sessionId": t.session_id,
-            "role": t.role,
-            "content": t.content,
-            "timestamp": t.timestamp,
-        }
-        for t in turns
-    ]
 
 
 @router.post(
@@ -441,55 +343,14 @@ async def get_session(
     return await _session_to_out(session, db)
 
 
-@router.post("/{session_id}/message", response_model=AgentResponse)
+@router.post("/{session_id}/message")
 async def send_message(
     session_id: str,
-    data: DialogueTurnIn,
     user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
 ):
-    """记录一轮被试发言；正式任务不自动触发 AI 追问或实时编码。"""
+    """Retired participant-message endpoint retained as a tombstone."""
+    del session_id, user
     raise HTTPException(status_code=status.HTTP_410_GONE, detail=LEGACY_DIALOGUE_DETAIL)
-    session = await _get_session(session_id, db)
-    if session.user_id != user.id:
-        raise HTTPException(status_code=403, detail="无权操作此会话")
-
-    if session.status == "completed":
-        raise HTTPException(status_code=400, detail="会话已结束")
-
-    if session.status == "preparation":
-        session.status = "in_progress"
-
-    # 记录用户消息
-    user_msg = DialogueTurn(
-        session_id=session.id,
-        role="user",
-        content=data.content,
-        audio_url=data.audio_url,
-        timestamp=int(time.time() * 1000),
-        emotion_features=data.emotion_features.model_dump() if data.emotion_features else None,
-    )
-    db.add(user_msg)
-    await db.flush()
-
-    decision = protocol_agent.handle(ProtocolEvent.PARTICIPANT_TURN)
-    agent_reply = decision.message or ""
-    coded_out = None
-
-    await db.refresh(session)
-
-    # WebSocket 只通知新发言已记录，不向正式任务注入自由生成内容。
-    await manager.send(session_id, {
-        "type": "participant_turn_recorded",
-        "message": agent_reply,
-        "coded_segment": None,
-    })
-
-    return AgentResponse(
-        message=agent_reply,
-        coded_segment=coded_out,
-        session_status=session.status,
-    )
 
 
 @router.post("/{session_id}/complete", response_model=SessionOut)
@@ -551,50 +412,6 @@ async def complete_session(
     )
     await db.flush()
     return await _session_to_out(await _get_session(session_id, db), db)
-
-
-# ---- WebSocket 端点 ----
-
-@router.websocket("/{session_id}/ws")
-async def session_websocket(websocket: WebSocket, session_id: str):
-    """WebSocket 实时对话通道"""
-    await websocket.close(code=4404, reason=LEGACY_DIALOGUE_DETAIL["message"])
-    return
-    token = websocket.query_params.get("token", "")
-    payload = decode_token(token)
-    user_id = payload.get("sub") if payload else None
-    if not user_id or not SAFE_SESSION_ID.fullmatch(session_id):
-        await websocket.close(code=4401)
-        return
-
-    async with AsyncSessionLocal() as db:
-        user = await db.get(User, user_id)
-        session = await db.get(AssessmentSession, session_id)
-        if (
-            user is None
-            or not user.is_active
-            or (
-                user.must_change_password
-                and payload.get("password_change_deferred") is not True
-            )
-            or int(payload.get("ver", -1)) != user.token_version
-            or session is None
-        ):
-            await websocket.close(code=4401)
-            return
-        session_owner = await db.get(User, session.user_id)
-        if session_owner is None or not can_access_user(user, session_owner):
-            await websocket.close(code=4403)
-            return
-
-    await manager.connect(session_id, websocket)
-    try:
-        while True:
-            data = await websocket.receive_json()
-            # 客户端可以通过 WebSocket 发送消息，由上层 API 处理
-            await manager.send(session_id, {"type": "echo", "data": data})
-    except WebSocketDisconnect:
-        manager.disconnect(session_id)
 
 
 # ---- 辅助 ----

@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import asyncio
 import csv
 import io
 import json
+import logging
 import re
+import shutil
 import uuid
 import zipfile
 from datetime import datetime, timezone
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import Response
@@ -19,7 +23,7 @@ from app.models.research import AuditLog, ModelTrainingJob
 from app.models.user import User
 from app.schemas.model_training import (
     ExperimentType, TrainingAuditOut, TrainingJobCreate, TrainingJobOut,
-    TrainingDatasetOut, TrainingSuiteCreate,
+    TrainingDatasetOut, TrainingJobsDeleteIn, TrainingSuiteCreate,
 )
 from app.services.model_artifacts import load_model_artifact
 from app.services.model_inference import probe_model_activation
@@ -37,6 +41,7 @@ from app.training.hyperparameters import (
 
 router = APIRouter(prefix="/research/model-training", tags=["模型训练"])
 settings = get_settings()
+logger = logging.getLogger(__name__)
 
 EXPERIMENTS: dict[str, tuple[str, str, str]] = {
     "tfidf_linear_svc": ("tfidf", "linear_svc", "TF-IDF + LinearSVC"),
@@ -47,6 +52,19 @@ EXPERIMENTS: dict[str, tuple[str, str, str]] = {
     "embedding_lightgbm": ("remote_embedding", "lightgbm", "Embedding + LightGBM"),
     "embedding_catboost": ("remote_embedding", "catboost", "Embedding + CatBoost"),
 }
+
+
+def _managed_artifact_directory(
+    job: ModelTrainingJob,
+    model_root: Path | None = None,
+) -> Path | None:
+    """Resolve only a per-version directory directly below managed storage."""
+    root = (model_root or settings.model_training_path).resolve()
+    candidates: list[Path] = []
+    if job.artifact_path:
+        candidates.append(Path(job.artifact_path).resolve().parent)
+    candidates.append((root / job.version).resolve())
+    return next((path for path in candidates if path.parent == root), None)
 
 
 def _effective_embedding() -> tuple[str, str, int, str]:
@@ -417,6 +435,104 @@ async def get_job(job_id: str, db: AsyncSession = Depends(get_db), user: User = 
     if not job:
         raise HTTPException(404, "训练任务不存在")
     return job
+
+
+async def _delete_training_jobs(
+    jobs: list[ModelTrainingJob], db: AsyncSession, user: User,
+) -> list[dict]:
+    """Atomically delete validated terminal jobs and then clean staged artifacts."""
+    for job in jobs:
+        if job.is_active:
+            raise HTTPException(409, f"训练版本 {job.version} 正在启用，请先取消启用")
+        if job.status in {"queued", "running"}:
+            raise HTTPException(409, f"训练版本 {job.version} 尚未结束，不能删除")
+
+    staged: list[tuple[Path, Path]] = []
+    try:
+        for job in jobs:
+            artifact_directory = _managed_artifact_directory(job)
+            if artifact_directory is None or not artifact_directory.exists():
+                continue
+            staged_directory = artifact_directory.parent / f".deleting-{job.id}"
+            if staged_directory.exists():
+                raise HTTPException(409, f"训练版本 {job.version} 已有未完成的清理任务")
+            await asyncio.to_thread(artifact_directory.replace, staged_directory)
+            staged.append((artifact_directory, staged_directory))
+
+        staged_ids = {path.name.removeprefix(".deleting-") for _, path in staged}
+        for job in jobs:
+            db.add(AuditLog(
+                actor_id=user.id,
+                action="model_training.delete",
+                target_type="model_training_job",
+                target_id=job.id,
+                detail={
+                    "version": job.version,
+                    "status": job.status,
+                    "artifact_staged": job.id in staged_ids,
+                },
+            ))
+            await db.delete(job)
+        await db.commit()
+    except Exception:
+        for artifact_directory, staged_directory in reversed(staged):
+            if staged_directory.exists() and not artifact_directory.exists():
+                await asyncio.to_thread(staged_directory.replace, artifact_directory)
+        raise
+
+    removed_job_ids: set[str] = set()
+    for _, staged_directory in staged:
+        job_id = staged_directory.name.removeprefix(".deleting-")
+        try:
+            await asyncio.to_thread(shutil.rmtree, staged_directory)
+            removed_job_ids.add(job_id)
+        except OSError as error:
+            logger.warning(
+                "training artifact cleanup failed job_id=%s path=%s error=%s",
+                job_id,
+                staged_directory,
+                error,
+            )
+    return [{
+        "status": "deleted", "job_id": job.id, "version": job.version,
+        "artifact_removed": job.id in removed_job_ids,
+    } for job in jobs]
+
+
+@router.post("/jobs/batch-delete")
+async def delete_jobs(
+    data: TrainingJobsDeleteIn,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_role("admin")),
+):
+    result = await db.execute(
+        select(ModelTrainingJob)
+        .where(ModelTrainingJob.id.in_(data.job_ids))
+        .with_for_update()
+    )
+    jobs_by_id = {job.id: job for job in result.scalars().all()}
+    missing = [job_id for job_id in data.job_ids if job_id not in jobs_by_id]
+    if missing:
+        raise HTTPException(404, f"有 {len(missing)} 条训练记录不存在或已被删除")
+    items = await _delete_training_jobs(
+        [jobs_by_id[job_id] for job_id in data.job_ids], db, user,
+    )
+    return {"status": "deleted", "deleted_count": len(items), "items": items}
+
+
+@router.delete("/jobs/{job_id}")
+async def delete_job(
+    job_id: str,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_role("admin")),
+):
+    """Delete one terminal training record and its managed model artifacts."""
+    job = await db.scalar(
+        select(ModelTrainingJob).where(ModelTrainingJob.id == job_id).with_for_update()
+    )
+    if not job:
+        raise HTTPException(404, "训练任务不存在")
+    return (await _delete_training_jobs([job], db, user))[0]
 
 
 def _csv_bytes(headers: list[str], rows: list[list[object]]) -> bytes:

@@ -99,6 +99,8 @@ class RouteSecurityTest(unittest.TestCase):
             ("/api/admin/model-services/diagnostics", "POST"),
             ("/api/research/model-training/jobs", "GET"),
             ("/api/research/model-training/jobs", "POST"),
+            ("/api/research/model-training/jobs/batch-delete", "POST"),
+            ("/api/research/model-training/jobs/{job_id}", "DELETE"),
             ("/api/research/model-training/jobs/{job_id}", "GET"),
             ("/api/research/model-training/jobs/{job_id}/activate", "POST"),
             ("/api/research/model-training/jobs/{job_id}/cancel", "POST"),
@@ -157,7 +159,6 @@ class RouteSecurityTest(unittest.TestCase):
             ("/api/sessions/asr/review-queue", "GET"),
             ("/api/research/quality/runs", "GET"),
             ("/api/assessment/task-order/assignments", "GET"),
-            ("/api/reports/review/pending", "GET"),
         }
         routes = {
             (route.path, method): route

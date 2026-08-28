@@ -1,6 +1,5 @@
 """报告相关 schemas"""
 from datetime import datetime
-from pydantic import Field
 from app.schemas.base import ApiModel as BaseModel
 
 
@@ -81,24 +80,31 @@ class ReportGenerateIn(BaseModel):
     reanalyze: bool = False
 
 
-class CodingReviewIn(BaseModel):
-    human_score: int = Field(ge=1, le=7)
-    review_note: str = Field(default="", max_length=2000)
-
-
-class CodingReviewOut(BaseModel):
+class MetacognitionMeasurementOut(BaseModel):
     id: str
-    session_id: str
-    transcript_segment_id: str | None = None
-    segment: str
-    dimension: str | None
-    score: int | None
-    confidence: float
-    reason: str
-    needs_review: bool
-    human_score: int | None = None
-    review_note: str | None = None
-    analysis_method: str
-    rubric_version: str
+    user_id: str
+    run_id: str
+    scope_type: str = "run"
+    scope_key: str = "run"
+    task_id: str | None = None
+    task_name: str | None = None
+    task_ids: list[str] = []
+    task_names: list[str] = []
+    effective_dialogue_count: int
+    denominator_breakdown: dict[str, int] = {}
+    fallback_dialogue_count: int = 0
+    unclassified_count: int = 0
+    dimension_counts: dict[str, int]
+    dimension_scores: dict[str, float | None]
+    score_available: bool
+    source: str
+    data_version: str
+    calculated_at: datetime
+    completed_at: datetime
 
-    model_config = {"from_attributes": True}
+
+class MetacognitionMeasurementPageOut(BaseModel):
+    items: list[MetacognitionMeasurementOut]
+    page: int
+    page_size: int
+    total: int

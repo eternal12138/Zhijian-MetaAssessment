@@ -26,8 +26,8 @@ from app.database import AsyncSessionLocal, get_db
 from app.models.protocol import AssessmentRun
 from app.models.report import MetacognitiveProfile
 from app.models.research import (
-    AnalysisJob, AuditLog, CodingAdjudication, CodingAnnotation,
-    CodingBatch, CodingUnit, CodingUnitAdjudication, ExpertAnnotation,
+    AnalysisJob, AuditLog, CodingBatch, CodingUnit,
+    CodingUnitAdjudication, ExpertAnnotation,
     ExportJob, MethodTemplate, RunQualityReview,
 )
 from app.models.asr import AsrJob, TranscriptVersion
@@ -37,8 +37,8 @@ from app.models.session import AssessmentSession, CodedSegment, TranscriptSegmen
 from app.models.task import AssessmentTask
 from app.models.user import User
 from app.schemas.research import (
-    AdjudicationIn, AnalysisJobOut, AnalysisStartIn, AnnotationIn,
-    AnnotationOut, CodingBatchAssignmentIn, CodingBatchCreateIn,
+    AnalysisJobOut, AnalysisStartIn,
+    CodingBatchAssignmentIn, CodingBatchCreateIn,
     CodingBatchOut, CodingBatchPreviewOut, CodingBatchScopeIn,
     CodingBatchScopeOptionsOut, CodingReviewerOut, CodingScopeStudentOut,
     CodingUnitAdjudicationIn,
@@ -46,9 +46,9 @@ from app.schemas.research import (
     ExpertAnnotationIn, ExpertAnnotationOut,
     CodingUnitAssignmentOut, CodingUnitDisagreementOut,
     AudioTranscriptExportIn, AudioTranscriptExportPreviewOut,
-    BulkReportPublishIn, DisagreementOut,
+    BulkReportPublishIn,
     ExportDownloadTicketOut, ExportJobOut,
-    ReportWorkflowIn, ReviewAssignmentOut,
+    ReportWorkflowIn,
     RunQualityDecisionIn, RunQualityOut,
     TemplateAuditOut, TemplateOut, TemplateUpdateIn,
 )
@@ -71,7 +71,6 @@ from app.services.metacognition_distribution import (
     DIMENSIONS as METACOGNITION_DIMENSIONS,
     aggregate_distribution,
     normalize_dimension,
-    resolve_run_distributions,
 )
 from app.services.secure_download import sign_download, verify_download
 from app.services.expert_dataset import (
@@ -1525,195 +1524,38 @@ async def adjudicate_coding_unit(
     return {"status": "success", "unit_id": unit.id}
 
 
-async def _annotation_map(
-    coding_ids: list[str],
-    db: AsyncSession,
-) -> dict[str, list[CodingAnnotation]]:
-    if not coding_ids:
-        return {}
-    result = await db.execute(
-        select(CodingAnnotation).where(CodingAnnotation.coding_id.in_(coding_ids))
-    )
-    mapped: dict[str, list[CodingAnnotation]] = {}
-    for item in result.scalars().all():
-        mapped.setdefault(item.coding_id, []).append(item)
-    return mapped
-
-
-@router.get("/review/assignments", response_model=list[ReviewAssignmentOut])
+@router.get("/review/assignments")
 async def list_review_assignments(
     user: User = Depends(require_role("teacher", "admin")),
-    db: AsyncSession = Depends(get_db),
 ):
+    del user
     raise HTTPException(status_code=status.HTTP_410_GONE, detail=LEGACY_REVIEW_DETAIL)
-    result = await db.execute(
-        select(CodedSegment, AssessmentSession, User)
-        .join(AssessmentSession, AssessmentSession.id == CodedSegment.session_id)
-        .join(User, User.id == AssessmentSession.user_id)
-        .where(CodedSegment.transcript_segment_id.is_not(None))
-        .order_by(CodedSegment.coded_at.asc())
-        .limit(500)
-    )
-    rows = [
-        (coding, session, owner)
-        for coding, session, owner in result.all()
-        if can_access_user(user, owner)
-    ]
-    annotations = await _annotation_map([row[0].id for row in rows], db)
-    output = []
-    for coding, session, _owner in rows:
-        existing = annotations.get(coding.id, [])
-        if len(existing) >= 2 or any(item.reviewer_id == user.id for item in existing):
-            continue
-        output.append(ReviewAssignmentOut(
-            coding_id=coding.id,
-            session_id=session.id,
-            run_id=session.run_id,
-            task_id=session.task_id,
-            segment=coding.segment,
-            ai_dimension=coding.dimension,
-            ai_score=coding.score,
-            ai_reason=coding.reason,
-            ai_confidence=coding.confidence,
-            completed_reviews=len(existing),
-        ))
-    return output[:100]
 
 
-@router.post("/review/codings/{coding_id}", response_model=AnnotationOut)
+@router.post("/review/codings/{coding_id}")
 async def submit_annotation(
     coding_id: str,
-    data: AnnotationIn,
     user: User = Depends(require_role("teacher", "admin")),
-    db: AsyncSession = Depends(get_db),
 ):
+    del coding_id, user
     raise HTTPException(status_code=status.HTTP_410_GONE, detail=LEGACY_REVIEW_DETAIL)
-    result = await db.execute(
-        select(CodedSegment)
-        .where(CodedSegment.id == coding_id)
-        .options(selectinload(CodedSegment.session))
-    )
-    coding = result.scalar_one_or_none()
-    if coding is None:
-        raise HTTPException(status_code=404, detail="编码片段不存在")
-    owner = await db.get(User, coding.session.user_id)
-    if owner is None or not can_access_user(user, owner):
-        raise HTTPException(status_code=403, detail="无权复核该学生")
-    duplicate = await db.scalar(
-        select(func.count(CodingAnnotation.id)).where(
-            CodingAnnotation.coding_id == coding.id,
-            CodingAnnotation.reviewer_id == user.id,
-        )
-    )
-    if duplicate:
-        raise HTTPException(status_code=409, detail="你已经独立编码过该片段")
-    annotation = CodingAnnotation(
-        coding_id=coding.id,
-        reviewer_id=user.id,
-        dimension=data.dimension,
-        score=data.score,
-        note=data.note.strip(),
-        created_at=_now(),
-    )
-    db.add(annotation)
-    await db.flush()
-    annotation_map = await _annotation_map([coding.id], db)
-    annotations = annotation_map.get(coding.id, [])
-    if len(annotations) >= 2:
-        first, second = annotations[:2]
-        if first.dimension == second.dimension and first.score == second.score:
-            coding.dimension = first.dimension
-            coding.human_score = first.score
-            coding.review_note = "双人独立编码一致"
-            coding.needs_review = False
-        else:
-            coding.needs_review = True
-            coding.review_note = "双人编码不一致，等待裁决"
-        if coding.session.run_id:
-            await generate_run_report(coding.session.run_id, db, reanalyze=False)
-    _audit(db, user, "coding.annotate", "coded_segment", coding.id, {
-        "review_round": len(annotations),
-    })
-    return annotation
 
 
-@router.get("/review/disagreements", response_model=list[DisagreementOut])
+@router.get("/review/disagreements")
 async def list_disagreements(
     user: User = Depends(require_role("admin")),
-    db: AsyncSession = Depends(get_db),
 ):
+    del user
     raise HTTPException(status_code=status.HTTP_410_GONE, detail=LEGACY_REVIEW_DETAIL)
-    result = await db.execute(
-        select(CodedSegment).where(CodedSegment.transcript_segment_id.is_not(None))
-    )
-    codes = list(result.scalars().all())
-    annotations = await _annotation_map([item.id for item in codes], db)
-    adjudicated_result = await db.execute(select(CodingAdjudication.coding_id))
-    adjudicated = set(adjudicated_result.scalars().all())
-    output = []
-    for coding in codes:
-        items = annotations.get(coding.id, [])
-        if len(items) < 2 or coding.id in adjudicated:
-            continue
-        first, second = items[:2]
-        if first.dimension == second.dimension and first.score == second.score:
-            continue
-        output.append(DisagreementOut(
-            coding_id=coding.id,
-            segment=coding.segment,
-            annotations=[
-                {
-                    "reviewer_id": item.reviewer_id,
-                    "dimension": item.dimension,
-                    "score": item.score,
-                    "note": item.note,
-                }
-                for item in items[:2]
-            ],
-        ))
-    return output
 
 
 @router.post("/review/codings/{coding_id}/adjudicate")
 async def adjudicate_coding(
     coding_id: str,
-    data: AdjudicationIn,
     user: User = Depends(require_role("admin")),
-    db: AsyncSession = Depends(get_db),
 ):
+    del coding_id, user
     raise HTTPException(status_code=status.HTTP_410_GONE, detail=LEGACY_REVIEW_DETAIL)
-    result = await db.execute(
-        select(CodedSegment)
-        .where(CodedSegment.id == coding_id)
-        .options(selectinload(CodedSegment.session))
-    )
-    coding = result.scalar_one_or_none()
-    if coding is None:
-        raise HTTPException(status_code=404, detail="编码片段不存在")
-    existing = await db.scalar(
-        select(func.count(CodingAdjudication.id)).where(
-            CodingAdjudication.coding_id == coding.id
-        )
-    )
-    if existing:
-        raise HTTPException(status_code=409, detail="该片段已经完成裁决")
-    adjudication = CodingAdjudication(
-        coding_id=coding.id,
-        adjudicator_id=user.id,
-        dimension=data.dimension,
-        score=data.score,
-        note=data.note.strip(),
-    )
-    db.add(adjudication)
-    coding.dimension = data.dimension
-    coding.human_score = data.score
-    coding.review_note = data.note.strip() or "第三方裁决"
-    coding.needs_review = False
-    await db.flush()
-    if coding.session.run_id:
-        await generate_run_report(coding.session.run_id, db, reanalyze=False)
-    _audit(db, user, "coding.adjudicate", "coded_segment", coding.id)
-    return {"status": "success"}
 
 
 async def _coding_unit_pending_for_run(
@@ -1758,44 +1600,15 @@ async def publish_report(
     if report.requires_review_count > 0:
         raise HTTPException(status_code=409, detail="仍有低置信度或分歧编码未处理")
     new_workflow_pending = await _coding_unit_pending_for_run(report.run_id, db)
-    if new_workflow_pending is not None:
-        if new_workflow_pending:
-            raise HTTPException(
-                status_code=409,
-                detail=f"仍有 {new_workflow_pending} 个盲编单元未形成共识或完成仲裁",
-            )
-        report.workflow_status = "published"
-        report.is_provisional = False
-        report.published_at = _now()
-        report.published_by = user.id
-        _audit(db, user, "report.publish", "metacognitive_profile", report.id, {
-            "note": data.note.strip(),
-            "coding_workflow": "fixed_blinded_batch",
-        })
-        await _notify_report_published(db, report)
-        return {"status": "published", "report_id": report.id}
-    session_ids_result = await db.execute(
-        select(AssessmentSession.id).where(AssessmentSession.run_id == report.run_id)
-    )
-    session_ids = list(session_ids_result.scalars().all())
-    coding_ids_result = await db.execute(
-        select(CodedSegment.id).where(
-            CodedSegment.session_id.in_(session_ids),
-            CodedSegment.transcript_segment_id.is_not(None),
-        )
-    ) if session_ids else None
-    coding_ids = list(coding_ids_result.scalars().all()) if coding_ids_result else []
-    annotation_counts_result = await db.execute(
-        select(CodingAnnotation.coding_id, func.count(CodingAnnotation.id))
-        .where(CodingAnnotation.coding_id.in_(coding_ids))
-        .group_by(CodingAnnotation.coding_id)
-    ) if coding_ids else None
-    annotation_counts = dict(annotation_counts_result.all()) if annotation_counts_result else {}
-    pending_double_review = sum(annotation_counts.get(coding_id, 0) < 2 for coding_id in coding_ids)
-    if pending_double_review:
+    if new_workflow_pending is None:
         raise HTTPException(
             status_code=409,
-            detail=f"仍有 {pending_double_review} 条证据未完成双人独立编码",
+            detail="尚未为该测评创建固定双盲编码批次，不能发布正式报告",
+        )
+    if new_workflow_pending:
+        raise HTTPException(
+            status_code=409,
+            detail=f"仍有 {new_workflow_pending} 个盲编单元未形成共识或完成仲裁",
         )
     report.workflow_status = "published"
     report.is_provisional = False
@@ -1803,6 +1616,7 @@ async def publish_report(
     report.published_by = user.id
     _audit(db, user, "report.publish", "metacognitive_profile", report.id, {
         "note": data.note.strip(),
+        "coding_workflow": "fixed_blinded_batch",
     })
     await _notify_report_published(db, report)
     return {"status": "published", "report_id": report.id}
@@ -1874,23 +1688,6 @@ async def research_analytics(
         for item in quality_rows
         if item.effective_status in {"eligible", "included", "included_override"}
     }
-    annotation_result = await db.execute(
-        select(CodingAnnotation)
-        .join(CodedSegment, CodedSegment.id == CodingAnnotation.coding_id)
-        .join(AssessmentSession, AssessmentSession.id == CodedSegment.session_id)
-        .where(AssessmentSession.run_id.in_(eligible_run_ids))
-        .order_by(CodingAnnotation.created_at.asc())
-    )
-    by_code: dict[str, list[CodingAnnotation]] = {}
-    for item in annotation_result.scalars().all():
-        by_code.setdefault(item.coding_id, []).append(item)
-    double = [items[:2] for items in by_code.values() if len(items) >= 2]
-    dimension_pairs = [(items[0].dimension, items[1].dimension) for items in double]
-    score_pairs = [
-        (items[0].score, items[1].score)
-        for items in double
-        if items[0].score is not None and items[1].score is not None
-    ]
     unit_result = await db.execute(
         select(CodingUnit).where(
             CodingUnit.status.in_(("agreed", "adjudicated")),
@@ -1914,14 +1711,15 @@ async def research_analytics(
     blinded_double = [
         items[:2] for items in by_unit.values() if len(items) == 2
     ]
-    if blinded_double:
-        dimension_pairs = [
-            (items[0].expert_label, items[1].expert_label)
-            for items in blinded_double
-        ]
-        double_count = len(blinded_double)
-    else:
-        double_count = len(double)
+    dimension_pairs = [
+        (items[0].expert_label, items[1].expert_label)
+        for items in blinded_double
+    ]
+    double_count = len(blinded_double)
+    # The current expert workflow records categorical labels, not the retired
+    # 1–7 per-fragment score.  Do not mix historical score annotations into the
+    # current agreement statistics merely to populate these optional fields.
+    score_pairs: list[tuple[float, float]] = []
 
     human_ai_pairs = [
         (unit.final_dimension, unit.ai_label or unit.ai_dimension)
@@ -2124,35 +1922,6 @@ async def research_dashboard(
             report.run_id,
             db,
         )
-        if double_review_pending is None:
-            session_ids_result = await db.execute(
-                select(AssessmentSession.id).where(
-                    AssessmentSession.run_id == report.run_id
-                )
-            )
-            session_ids = list(session_ids_result.scalars().all())
-            coding_ids_result = await db.execute(
-                select(CodedSegment.id).where(
-                    CodedSegment.session_id.in_(session_ids),
-                    CodedSegment.transcript_segment_id.is_not(None),
-                )
-            ) if session_ids else None
-            coding_ids = (
-                list(coding_ids_result.scalars().all())
-                if coding_ids_result else []
-            )
-            counts_result = await db.execute(
-                select(
-                    CodingAnnotation.coding_id,
-                    func.count(CodingAnnotation.id),
-                )
-                .where(CodingAnnotation.coding_id.in_(coding_ids))
-                .group_by(CodingAnnotation.coding_id)
-            ) if coding_ids else None
-            counts = dict(counts_result.all()) if counts_result else {}
-            double_review_pending = sum(
-                counts.get(coding_id, 0) < 2 for coding_id in coding_ids
-            )
         recent_reports.append({
             "id": report.id,
             "run_id": report.run_id,
@@ -3381,8 +3150,8 @@ async def create_audio_transcript_export(
     db.add(job)
     await db.commit()
     await db.refresh(job)
-    # 核心修复：立即在当前进程内异步调度执行导出任务，无需依赖外部独立 Worker
-    asyncio.create_task(_run_audio_transcript_export(job.id, user.id))
+    # dev.ps1 和 Compose 均启动独立 export-worker，由其加行锁认领任务。
+    # API 只提交队列，避免多个执行入口同时写入同一压缩包。
     return _export_job_out(job)
 
 
@@ -3699,81 +3468,8 @@ async def get_macro_analytics(
             }
 
     global_run_ids = [run.id for run, _owner, _profile in all_run_rows]
-    latest_batch_by_run: dict[str, CodingBatch] = {}
-    if global_run_ids:
-        coding_batch_rows = (await db.execute(
-            select(CodingBatch, CodingUnit.run_id)
-            .join(CodingUnit, CodingUnit.batch_id == CodingBatch.id)
-            .where(
-                CodingUnit.run_id.in_(global_run_ids),
-                CodingBatch.status == "completed",
-            )
-            .distinct()
-            .order_by(
-                CodingUnit.run_id.asc(),
-                CodingBatch.completed_at.desc(),
-                CodingBatch.created_at.desc(),
-                CodingBatch.id.desc(),
-            )
-        )).all()
-        for batch, batch_run_id in coding_batch_rows:
-            if batch_run_id and batch_run_id not in latest_batch_by_run:
-                latest_batch_by_run[batch_run_id] = batch
-    latest_batch_ids = [batch.id for batch in latest_batch_by_run.values()]
-    expert_rows = (await db.execute(
-        select(CodingUnit.run_id, CodingUnit.final_dimension, func.count(CodingUnit.id))
-        .where(
-            CodingUnit.batch_id.in_(latest_batch_ids),
-            CodingUnit.status.in_(("agreed", "adjudicated")),
-            CodingUnit.final_dimension.is_not(None),
-        )
-        .group_by(CodingUnit.run_id, CodingUnit.final_dimension)
-    )).all() if latest_batch_ids else []
-
-    global_session_ids = list((await db.scalars(
-        select(AssessmentSession.id).where(AssessmentSession.run_id.in_(global_run_ids))
-    )).all()) if global_run_ids else []
-    latest_extraction_by_session: dict[str, ExtractionJob] = {}
-    if global_session_ids:
-        extraction_jobs = list((await db.scalars(
-            select(ExtractionJob)
-            .join(
-                ExtractionCandidate,
-                ExtractionCandidate.extraction_job_id == ExtractionJob.id,
-            )
-            .where(ExtractionJob.session_id.in_(global_session_ids))
-            .distinct()
-        )).all())
-        for extraction_job in extraction_jobs:
-            current = latest_extraction_by_session.get(extraction_job.session_id)
-            job_key = (
-                extraction_job.generation_no or 0,
-                extraction_job.created_at or datetime.min,
-                extraction_job.id,
-            )
-            current_key = (
-                current.generation_no or 0,
-                current.created_at or datetime.min,
-                current.id,
-            ) if current else (-1, datetime.min, "")
-            if job_key > current_key:
-                latest_extraction_by_session[extraction_job.session_id] = extraction_job
-    latest_extraction_job_ids = [job.id for job in latest_extraction_by_session.values()]
-    model_rows = (await db.execute(
-        select(
-            ExtractionCandidate.run_id,
-            ExtractionCandidate.predicted_dimension,
-            func.count(ExtractionCandidate.id),
-        )
-        .where(
-            ExtractionCandidate.extraction_job_id.in_(latest_extraction_job_ids),
-            ExtractionCandidate.review_status.in_(("accepted", "pending")),
-            ExtractionCandidate.classification_status.in_(("classified", "classified_with_fallback")),
-            ExtractionCandidate.predicted_dimension.is_not(None),
-        )
-        .group_by(ExtractionCandidate.run_id, ExtractionCandidate.predicted_dimension)
-    )).all() if latest_extraction_job_ids else []
-    resolved_by_run = resolve_run_distributions(expert_rows, model_rows)
+    from app.services.metacognition_evidence import load_run_evidence
+    resolved_by_run = await load_run_evidence(global_run_ids, db)
 
     personal_run_ids = [
         run.id for run, owner, _profile in all_run_rows
@@ -3848,15 +3544,13 @@ async def get_macro_analytics(
     )
     selected_run_id_set = set(run_ids)
     candidate_total = sum(
-        int(count) for candidate_run_id, _dimension, count in model_rows
-        if candidate_run_id in selected_run_id_set
+        row["classification_completed_count"] for run_id, row in resolved_by_run.items()
+        if run_id in selected_run_id_set
     )
-    eligible_candidate_count = int(await db.scalar(
-        select(func.count(ExtractionCandidate.id)).where(
-            ExtractionCandidate.run_id.in_(run_ids),
-            ExtractionCandidate.review_status.in_(("accepted", "pending")),
-        )
-    ) or 0) if run_ids else 0
+    eligible_candidate_count = sum(
+        row["classification_eligible_count"] for run_id, row in resolved_by_run.items()
+        if run_id in selected_run_id_set
+    )
 
     response = {
         "class_name": selected_class_group,
@@ -3883,8 +3577,9 @@ async def get_macro_analytics(
         "class_averages": averages(selected_score_rows),
         "reference_averages": averages(reference_score_rows),
         "profile_source": (
-            "雷达图按监控、调控、评估三类证据占三类总数的百分比计算。"
-            "每次测评优先采用最新已完成盲编批次的专家共识/仲裁结果；该次测评没有专家结果时，使用最新抽取版本的生产模型分类。"
+            "雷达图按各类标签命中数 ÷ 最终有效对话数计算，不额外归一化。"
+            "逐会话采用管理员上传校对集或当前转录的完整复核有效对话；缺少时采用已完成专家编码，仍无复核数据才回退三类标签总数。"
+            "先累计同一范围的分子和分母，再计算学生、班级和全体占比；回退或未分类数量会单独标记。"
             "班级与全体仅返回汇总，不向学生披露他人明细。"
         ),
         "radar_profiles": {

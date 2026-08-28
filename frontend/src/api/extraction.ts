@@ -218,11 +218,6 @@ export const extractionApi = {
       { timeout: 120_000 }
     )
   },
-  jobStatus(jobId: string) {
-    return apiClient.get<ExtractionJobStatus>(
-      `/research/extraction/jobs/${jobId}/status`
-    )
-  },
   classifyJob(jobId: string) {
     return apiClient.post<ExtractionCandidate[]>(`/research/extraction/jobs/${jobId}/classify`)
   },
@@ -253,6 +248,12 @@ export const extractionApi = {
   },
   complete(sessionId: string) {
     return apiClient.post<ExtractionJob>(`/research/extraction/sessions/${sessionId}/complete`)
+  },
+  exportReviewResult(sessionId: string, jobId?: string) {
+    return apiClient.get<Blob>(`/research/extraction/sessions/${sessionId}/review-export`, {
+      params: { job_id: jobId || undefined },
+      responseType: 'blob'
+    })
   },
   acquireLock(sessionId: string) {
     return apiClient.post<ReviewLease>(`/research/extraction/sessions/${sessionId}/lock`)

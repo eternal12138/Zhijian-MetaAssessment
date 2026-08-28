@@ -39,12 +39,6 @@ class EmotionFeatures(BaseModel):
     pitch_variation: float = 0.0
 
 
-class DialogueTurnIn(BaseModel):
-    content: str
-    audio_url: str | None = None
-    emotion_features: EmotionFeatures | None = None
-
-
 class DialogueTurnOut(BaseModel):
     id: str
     session_id: str
@@ -190,10 +184,3 @@ class SessionOut(BaseModel):
 
 class SessionStart(BaseModel):
     task_id: str
-
-
-class AgentResponse(BaseModel):
-    """AI Agent 回复"""
-    message: str
-    coded_segment: CodedSegmentOut | None = None
-    session_status: str

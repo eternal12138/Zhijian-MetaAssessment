@@ -816,6 +816,44 @@ async function completeReview() {
   finally { busyId.value = '' }
 }
 
+async function exportReviewResult() {
+  if (!detail.value?.job || !detail.value.candidate_total) return
+  const reviewComplete = currentJobStatus.value === 'reviewed' && pendingCount.value === 0
+  if (!reviewComplete) {
+    const confirmed = await confirmAction({
+      title: '导出未完成复核快照',
+      message: `当前仍有 ${pendingCount.value} 条候选待复核。导出文件会包含 pending 记录并明确标记“非最终结果”，不能作为最终复核数据使用。是否继续？`,
+      confirmText: '仍然导出',
+      tone: 'warning'
+    })
+    if (!confirmed) return
+  }
+  busyId.value = 'export'
+  errorMessage.value = ''
+  successMessage.value = ''
+  try {
+    const response = await extractionApi.exportReviewResult(
+      detail.value.session_id,
+      detail.value.job.id
+    )
+    const url = URL.createObjectURL(response.data)
+    const anchor = document.createElement('a')
+    anchor.href = url
+    anchor.download = `候选复核${reviewComplete ? '最终结果' : '未完成快照'}_${detail.value.username}_${detail.value.task_title}_V${detail.value.job.generation_no}.csv`
+    document.body.appendChild(anchor)
+    anchor.click()
+    anchor.remove()
+    URL.revokeObjectURL(url)
+    successMessage.value = reviewComplete
+      ? '当前抽取版本的最终候选复核结果已导出。'
+      : '未完成复核快照已导出；文件内含待复核记录，不能视为最终结果。'
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '候选复核结果导出失败'
+  } finally {
+    busyId.value = ''
+  }
+}
+
 function focusRelative(delta: number) {
   const candidates = detail.value?.candidates ?? []
   if (!candidates.length) return
@@ -1120,7 +1158,7 @@ onBeforeUnmount(() => {
 
             <section class="app-surface-card p-4 mb-3"><h5>人工补充遗漏（新增独立候选）</h5><p class="small text-muted">用于补录 AI 未提取到的元认知片段，不会修改或覆盖上方 AI 候选。点击转录片段会同步播放对应录音范围。</p><div class="segment-strip mb-3"><button v-for="segment in detail.segments" :key="segment.id" class="btn btn-sm btn-outline-secondary" @click="useSegment(segment.id)">片段 {{ (segment.segment_no ?? 0) + 1 }}</button></div><textarea v-model="addition.original_text" class="form-control mb-2" rows="2" placeholder="原始证据文本" :disabled="!canEdit"></textarea><textarea v-model="addition.clean_text" class="form-control mb-2" rows="2" placeholder="保守清洗文本" :disabled="!canEdit"></textarea><input v-model="addition.review_note" class="form-control mb-3" placeholder="补充原因" :disabled="!canEdit"><button class="btn btn-primary" :disabled="!canEdit || busyId === 'add' || !addition.original_text || !addition.clean_text" @click="addCandidate">新增为已接受候选</button></section>
 
-            <section class="app-surface-card p-4"><div class="d-flex flex-wrap justify-content-between align-items-center gap-3"><div><strong>完成候选复核</strong><div class="small text-muted">所有候选均处理后，才会进入双人盲编批次。</div></div><button class="btn btn-primary" :disabled="!canEdit || pendingCount > 0 || acceptedCount === 0 || busyId === 'complete'" @click="completeReview">确认完成复核</button></div></section>
+            <section class="app-surface-card p-4"><div class="d-flex flex-wrap justify-content-between align-items-center gap-3"><div><strong>{{ currentJobStatus === 'reviewed' ? '候选复核已完成' : '完成候选复核' }}</strong><div class="small text-muted">{{ currentJobStatus === 'reviewed' ? '可导出当前抽取版本全部已接受、已排除决定及其追溯字段。' : '尚未完成时也可导出当前快照，但文件会警告其不是最终复核结果。' }}</div></div><div class="d-flex flex-wrap gap-2"><button v-if="detail.candidate_total" class="btn btn-outline-primary" :disabled="busyId === 'export'" @click="exportReviewResult"><span v-if="busyId === 'export'" class="spinner-border spinner-border-sm me-1"></span><i v-else class="bi bi-file-earmark-spreadsheet me-1"></i>{{ currentJobStatus === 'reviewed' ? '导出最终复核结果' : '导出当前复核快照' }}</button><button v-if="currentJobStatus !== 'reviewed'" class="btn btn-primary" :disabled="!canEdit || pendingCount > 0 || acceptedCount === 0 || busyId === 'complete'" @click="completeReview">确认完成复核</button></div></div></section>
           </template>
         </template>
         <div v-else class="app-surface-card p-5 text-center text-muted">请从左侧选择一次测评</div>

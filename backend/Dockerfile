@@ -13,7 +13,7 @@ RUN sed -i \
         -e "s|https://deb.debian.org/debian|https://mirrors.aliyun.com/debian|g" \
         /etc/apt/sources.list.d/debian.sources \
     && apt-get -o Acquire::Retries=3 update \
-    && apt-get install -y --no-install-recommends ffmpeg ca-certificates \
+    && apt-get install -y --no-install-recommends ffmpeg ca-certificates libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

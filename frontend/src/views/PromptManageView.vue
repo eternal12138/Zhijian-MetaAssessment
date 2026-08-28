@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { researchApi, type MethodTemplate, type TemplateAudit, type ModelDatasetSource, type ModelEvaluation, type ModelEvaluationIndex, type ModelEvaluationVersion, type ModelExperimentType, type ModelHyperparameterCatalog, type ModelHyperparameterValue, type ModelTrainingAudit, type ModelTrainingDataset, type ModelTrainingJob } from '../api/research'
 import { adminApi, type NarrationSlot } from '../api/admin'
 import { parseApiDate } from '../utils/datetime'
@@ -52,6 +52,12 @@ const expandedTrainingGroupKey = ref('')
 const trainingAudits = ref<ModelTrainingAudit[]>([])
 const trainingAuditLoading = ref(true)
 const trainingCreateOpen = ref(false)
+const reusedTrainingSource = ref<ModelTrainingJob | null>(null)
+const trainingRecordSearch = ref('')
+const trainingRecordStatus = ref<'all' | 'active' | 'running' | 'completed' | 'failed' | 'cancelled'>('all')
+const trainingRecordPage = ref(1)
+const selectedTrainingJobIds = ref<string[]>([])
+const TRAINING_RECORD_PAGE_SIZE = 6
 const trainingCreateMode = ref<'single' | 'custom' | 'suite'>('single')
 const selectedCustomExperiments = ref<ModelExperimentType[]>([
   'tfidf_linear_svc',
@@ -72,8 +78,17 @@ const hyperparameterCatalog = ref<ModelHyperparameterCatalog | null>(null)
 const tuningEnabled = ref<Partial<Record<ModelExperimentType, boolean>>>({})
 const trainingParameters = ref<Partial<Record<ModelExperimentType, Record<string, ModelHyperparameterValue>>>>({})
 let trainingPoll: number | null = null
+let trainingPollBusy = false
+let completionSyncPollsRemaining = 0
 let trainingGroupsInitialized = false
 let historicalComparisonInitialized = false
+const TRAINING_POLL_INTERVAL_MS = 4000
+const COMPLETION_SYNC_POLL_COUNT = 15
+
+interface TrainingLoadResult {
+  completedSinceLastRead: boolean
+  terminalSinceLastRead: boolean
+}
 
 const experimentDefinitions: Array<{
   value: ModelExperimentType
@@ -160,6 +175,56 @@ const trainingVersionGroups = computed(() => {
     }))
     .sort((left, right) => right.latestAt - left.latestAt)
 })
+
+function isTrainingJobDeletable(job: ModelTrainingJob) {
+  return !job.is_active && ['completed', 'failed', 'cancelled'].includes(job.status)
+}
+
+function matchesTrainingStatus(job: ModelTrainingJob) {
+  if (trainingRecordStatus.value === 'all') return true
+  if (trainingRecordStatus.value === 'active') return job.is_active
+  if (trainingRecordStatus.value === 'running') return ['queued', 'running'].includes(job.status)
+  return job.status === trainingRecordStatus.value
+}
+
+const filteredTrainingVersionGroups = computed(() => {
+  const query = trainingRecordSearch.value.trim().toLocaleLowerCase()
+  return trainingVersionGroups.value.flatMap(group => {
+    const statusJobs = group.jobs.filter(matchesTrainingStatus)
+    if (!statusJobs.length) return []
+    if (!query) return [{ ...group, jobs: statusJobs }]
+    const groupText = `${group.label} ${group.jobs[0]?.config_snapshot?.dataset_name || ''}`.toLocaleLowerCase()
+    const matchingJobs = groupText.includes(query)
+      ? statusJobs
+      : statusJobs.filter(job => `${job.version} ${experimentDefinition(job).title} ${experimentDefinition(job).feature} ${experimentDefinition(job).classifier}`.toLocaleLowerCase().includes(query))
+    return matchingJobs.length ? [{ ...group, jobs: matchingJobs }] : []
+  })
+})
+
+const trainingRecordPageCount = computed(() => Math.max(1, Math.ceil(filteredTrainingVersionGroups.value.length / TRAINING_RECORD_PAGE_SIZE)))
+const visibleTrainingVersionGroups = computed(() => {
+  const start = (trainingRecordPage.value - 1) * TRAINING_RECORD_PAGE_SIZE
+  return filteredTrainingVersionGroups.value.slice(start, start + TRAINING_RECORD_PAGE_SIZE)
+})
+const visibleDeletableTrainingJobIds = computed(() => visibleTrainingVersionGroups.value.flatMap(group => group.jobs.filter(isTrainingJobDeletable).map(job => job.id)))
+const allVisibleDeletableSelected = computed(() => visibleDeletableTrainingJobIds.value.length > 0 && visibleDeletableTrainingJobIds.value.every(jobId => selectedTrainingJobIds.value.includes(jobId)))
+
+watch([trainingRecordSearch, trainingRecordStatus], () => { trainingRecordPage.value = 1 })
+watch(trainingRecordPageCount, count => { trainingRecordPage.value = Math.min(trainingRecordPage.value, count) })
+watch(trainingJobs, jobs => {
+  const validIds = new Set(jobs.filter(isTrainingJobDeletable).map(job => job.id))
+  selectedTrainingJobIds.value = selectedTrainingJobIds.value.filter(jobId => validIds.has(jobId))
+})
+
+function toggleVisibleTrainingSelection() {
+  const visibleIds = visibleDeletableTrainingJobIds.value
+  if (allVisibleDeletableSelected.value) {
+    const visibleSet = new Set(visibleIds)
+    selectedTrainingJobIds.value = selectedTrainingJobIds.value.filter(jobId => !visibleSet.has(jobId))
+    return
+  }
+  selectedTrainingJobIds.value = [...new Set([...selectedTrainingJobIds.value, ...visibleIds])]
+}
 
 function trainingGroupSummary(jobs: ModelTrainingJob[]) {
   const completed = jobs.filter(job => job.status === 'completed').length
@@ -561,25 +626,30 @@ const historicalComparisonCompatibility = computed(() => {
 })
 
 function toggleHistoricalComparisonModel(modelId: string) {
+  // Once the user has changed the selection, an empty array is intentional and
+  // must not be replaced by defaults during a later evaluation refresh.
+  historicalComparisonInitialized = true
   historicalComparisonModelIds.value = historicalComparisonModelIds.value.includes(modelId)
     ? historicalComparisonModelIds.value.filter(id => id !== modelId)
     : [...historicalComparisonModelIds.value, modelId]
 }
 
 function selectHistoricalVersionBestModels() {
+  historicalComparisonInitialized = true
   historicalComparisonModelIds.value = performanceVersionGroups.value
     .map(group => bestPerformanceModel(group)?.model_id)
     .filter((id): id is string => Boolean(id))
 }
 
 function clearHistoricalComparison() {
+  historicalComparisonInitialized = true
   historicalComparisonModelIds.value = []
 }
 
 function initializeHistoricalComparisonSelection() {
   const validIds = new Set(historicalComparisonOptions.value.map(item => item.model.model_id))
   historicalComparisonModelIds.value = historicalComparisonModelIds.value.filter(id => validIds.has(id))
-  if (historicalComparisonInitialized && historicalComparisonModelIds.value.length) return
+  if (historicalComparisonInitialized) return
   const defaults = performanceVersionGroups.value
     .slice(0, 2)
     .map(group => bestPerformanceModel(group)?.model_id)
@@ -1024,17 +1094,20 @@ function trainingAuditLabel(action: string) {
     'model_training.cancel': '请求取消', 'model_training.cancelled': '训练已取消',
     'model_training.completed': '训练完成', 'model_training.failed': '训练失败',
     'model_training.recovered_failed': '中断恢复', 'model_training.activate': '启用/回滚模型',
-    'model_training.deactivate': '取消启用模型',
+    'model_training.deactivate': '取消启用模型', 'model_training.delete': '清除训练记录',
     'model_training.dataset_upload': '上传训练数据版本'
   } as Record<string, string>)[action] ?? action
 }
 
-async function loadTrainingJobs(silent = false) {
+async function loadTrainingJobs(silent = false): Promise<TrainingLoadResult> {
+  const outcome: TrainingLoadResult = {
+    completedSinceLastRead: false,
+    terminalSinceLastRead: false
+  }
   if (!silent) trainingLoading.value = true
   try {
     const previous = new Map(trainingJobs.value.map(item => [item.id, item.status]))
     const next = (await researchApi.listModelTrainingJobs()).data
-    let completedSinceLastRead = false
     trainingJobs.value = next
     if (!comparisonGroups.value.some(group => group.key === selectedComparisonGroupKey.value)) {
       selectedComparisonGroupKey.value = comparisonGroups.value[0]?.key ?? ''
@@ -1050,19 +1123,18 @@ async function loadTrainingJobs(silent = false) {
       next.forEach(item => {
         const oldStatus = previous.get(item.id)
         if (oldStatus && oldStatus !== item.status && ['completed', 'failed', 'cancelled'].includes(item.status)) {
-          if (item.status === 'completed') completedSinceLastRead = true
+          outcome.terminalSinceLastRead = true
+          if (item.status === 'completed') outcome.completedSinceLastRead = true
           notify(`训练任务 ${item.version}${item.status === 'completed' ? '已完成，等待人工验收' : item.status === 'failed' ? '执行失败' : '已取消'}`, item.status === 'completed' ? 'success' : item.status === 'failed' ? 'danger' : 'warning')
         }
       })
     }
-    // 先确认数据库中的训练任务已经完成，再读取绑定到该任务的评估 manifest，
-    // 避免并行轮询时评估接口先返回旧版本、随后轮询停止造成页面滞后。
-    if (completedSinceLastRead) await loadModelEvaluations(true)
   } catch (error) {
     if (!silent) notify(error instanceof Error ? error.message : '训练任务读取失败', 'danger')
   } finally {
     trainingLoading.value = false
   }
+  return outcome
 }
 
 async function loadModelEvaluations(silent = false) {
@@ -1072,10 +1144,45 @@ async function loadModelEvaluations(silent = false) {
     initializeHistoricalComparisonSelection()
     modelEvaluationError.value = ''
   } catch (error) {
-    modelEvaluationError.value = error instanceof Error ? error.message : '模型评估结果读取失败'
+    // 后台刚写完训练状态时，评估清单可能仍处于极短的可见性窗口。
+    // 静默同步保留上一次有效内容并继续重试，避免整个区域闪成错误状态。
+    if (!silent || !modelEvaluationIndex.value) {
+      modelEvaluationError.value = error instanceof Error ? error.message : '模型评估结果读取失败'
+    }
   } finally {
     modelEvaluationLoading.value = false
   }
+}
+
+async function refreshTrainingState(force = false) {
+  if (trainingPollBusy) return
+  const hasActiveJobs = trainingJobs.value.some(item => ['queued', 'running'].includes(item.status))
+  if (!force && !hasActiveJobs && completionSyncPollsRemaining <= 0) return
+
+  trainingPollBusy = true
+  try {
+    const outcome = await loadTrainingJobs(true)
+    const stillHasActiveJobs = trainingJobs.value.some(item => ['queued', 'running'].includes(item.status))
+    if (outcome.completedSinceLastRead) {
+      // 状态完成与评估汇总跨越数据库和文件产物两个读取面。最后一个任务
+      // 完成后继续同步一分钟，避免首次读取恰好命中旧汇总便永久停止轮询。
+      completionSyncPollsRemaining = COMPLETION_SYNC_POLL_COUNT
+    }
+    const inCompletionSyncWindow = !stillHasActiveJobs && completionSyncPollsRemaining > 0
+    if (force || outcome.completedSinceLastRead || inCompletionSyncWindow) {
+      await loadModelEvaluations(true)
+    }
+    if (outcome.terminalSinceLastRead) {
+      await loadTrainingAudits()
+    }
+    if (inCompletionSyncWindow) completionSyncPollsRemaining -= 1
+  } finally {
+    trainingPollBusy = false
+  }
+}
+
+function refreshTrainingWhenVisible() {
+  if (document.visibilityState === 'visible') void refreshTrainingState(true)
 }
 
 async function loadTrainingAudits() {
@@ -1144,6 +1251,44 @@ function resetTrainingParameters(experiment: ModelExperimentType) {
   trainingParameters.value[experiment] = {
     ...(hyperparameterCatalog.value?.[experiment]?.defaults ?? {})
   }
+}
+
+function toggleTrainingCreatePanel() {
+  trainingCreateOpen.value = !trainingCreateOpen.value
+  if (trainingCreateOpen.value) reusedTrainingSource.value = null
+}
+
+async function reuseTrainingParameters(job: ModelTrainingJob) {
+  const experiment = jobExperiment(job)
+  const frozenParameters = job.config_snapshot?.classifier_parameters
+  const parameters = (
+    frozenParameters && typeof frozenParameters === 'object' && !Array.isArray(frozenParameters)
+      ? frozenParameters
+      : {}
+  ) as Record<string, ModelHyperparameterValue>
+  trainingCreateMode.value = 'single'
+  selectedExperiment.value = experiment
+  trainingParameters.value[experiment] = {
+    ...(hyperparameterCatalog.value?.[experiment]?.defaults ?? {}),
+    ...parameters
+  }
+  // Always submit the complete frozen set so later default changes cannot
+  // silently alter a parameter-reuse run.
+  tuningEnabled.value[experiment] = true
+  trainingDatasetSource.value = 'system_gold'
+  selectedTrainingDatasetId.value = ''
+  trainingDatasetFile.value = null
+  trainingDatasetName.value = ''
+  const timestamp = new Date().toISOString().replace(/[-:TZ.]/g, '').slice(0, 12)
+  const rootVersion = job.version.replace(/(?:-retry\d+)+$/, '').slice(0, 43)
+  trainingVersion.value = `${rootVersion}-reuse-${timestamp}`
+  reusedTrainingSource.value = job
+  trainingCreateOpen.value = true
+  await nextTick()
+  document.getElementById('training-builder')?.scrollIntoView({
+    behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth',
+    block: 'start'
+  })
 }
 
 function parameterSummary(job: ModelTrainingJob | ModelEvaluation) {
@@ -1238,6 +1383,7 @@ async function createTrainingExperiment() {
         )).data]
     await Promise.all([loadTrainingJobs(true), loadModelEvaluations(true), loadTrainingAudits()])
     trainingCreateOpen.value = false
+    reusedTrainingSource.value = null
     notify(isSuite ? `已创建 ${jobs.length} 组横向对比实验，后台将依次处理` : '训练任务已创建，将由后台 Worker 处理', 'success')
   } catch (error) {
     notify(error instanceof Error ? error.message : '训练任务创建失败', 'danger')
@@ -1339,6 +1485,55 @@ async function retryTrainingJob(job: ModelTrainingJob) {
   }
 }
 
+async function deleteTrainingJob(job: ModelTrainingJob) {
+  if (job.is_active || ['queued', 'running'].includes(job.status)) return
+  const confirmed = await confirmAction({
+    title: '清除训练记录',
+    message: `将永久删除 ${job.version} 的训练记录、模型产物和评估指标。训练数据集及操作审计会保留，此操作不可撤销。是否继续？`,
+    confirmText: '永久删除',
+    tone: 'danger'
+  })
+  if (!confirmed) return
+  trainingBusyId.value = job.id
+  try {
+    await researchApi.deleteModelTrainingJob(job.id)
+    if (expandedTrainingJobId.value === job.id) expandedTrainingJobId.value = ''
+    if (reusedTrainingSource.value?.id === job.id) reusedTrainingSource.value = null
+    await Promise.all([loadTrainingJobs(true), loadModelEvaluations(true), loadTrainingAudits()])
+    notify(`已清除训练记录 ${job.version}`, 'success')
+  } catch (error) {
+    notify(error instanceof Error ? error.message : '训练记录清除失败', 'danger')
+  } finally {
+    trainingBusyId.value = ''
+  }
+}
+
+async function deleteSelectedTrainingJobs() {
+  const selected = trainingJobs.value.filter(job => selectedTrainingJobIds.value.includes(job.id) && isTrainingJobDeletable(job))
+  if (!selected.length) return
+  const confirmed = await confirmAction({
+    title: `批量清除 ${selected.length} 条训练记录`,
+    message: `将永久删除已选中的 ${selected.length} 条训练记录、模型产物和评估指标。训练数据集及操作审计会保留；只要其中一条状态不允许删除，本次操作就会整体取消。`,
+    confirmText: `永久删除 ${selected.length} 条`,
+    tone: 'danger'
+  })
+  if (!confirmed) return
+  trainingBusyId.value = 'batch-delete'
+  try {
+    const deletedIds = new Set(selected.map(job => job.id))
+    const result = (await researchApi.deleteModelTrainingJobs([...deletedIds])).data
+    selectedTrainingJobIds.value = []
+    if (deletedIds.has(expandedTrainingJobId.value)) expandedTrainingJobId.value = ''
+    if (reusedTrainingSource.value && deletedIds.has(reusedTrainingSource.value.id)) reusedTrainingSource.value = null
+    await Promise.all([loadTrainingJobs(true), loadModelEvaluations(true), loadTrainingAudits()])
+    notify(`已清除 ${result.deleted_count} 条训练记录`, 'success')
+  } catch (error) {
+    notify(error instanceof Error ? error.message : '批量清除训练记录失败', 'danger')
+  } finally {
+    trainingBusyId.value = ''
+  }
+}
+
 async function activateTrainingJob(job: ModelTrainingJob) {
   if (job.is_active) return
   const risk = overfitRisk(job)
@@ -1386,13 +1581,15 @@ async function deactivateTrainingJob(job: ModelTrainingJob) {
 onMounted(() => {
   void Promise.all([loadTemplates(), loadTemplateAudits(), loadProtocolConfig(), loadNarrationSlots(), loadTrainingJobs(), loadModelEvaluations(), loadTrainingAudits(), loadTrainingDatasets(), loadHyperparameterCatalog()])
   trainingPoll = window.setInterval(() => {
-    if (trainingJobs.value.some(item => ['queued', 'running'].includes(item.status))) {
-      void loadTrainingJobs(true)
-    }
-  }, 4000)
+    void refreshTrainingState()
+  }, TRAINING_POLL_INTERVAL_MS)
+  document.addEventListener('visibilitychange', refreshTrainingWhenVisible)
+  window.addEventListener('focus', refreshTrainingWhenVisible)
 })
 onBeforeUnmount(() => {
   if (trainingPoll !== null) window.clearInterval(trainingPoll)
+  document.removeEventListener('visibilitychange', refreshTrainingWhenVisible)
+  window.removeEventListener('focus', refreshTrainingWhenVisible)
   clearNarrationAudioUrls()
 })
 </script>
@@ -1416,9 +1613,12 @@ onBeforeUnmount(() => {
         </div>
         <div class="training-create-entry mb-3">
           <div><strong>创建训练实验</strong><small>可训练单个模型、自选若干模型横向对比，或一次运行全部七组方案。</small></div>
-          <button class="btn btn-primary" @click="trainingCreateOpen = !trainingCreateOpen"><i class="bi bi-plus-circle me-1"></i>{{ trainingCreateOpen ? '收起创建面板' : '新建训练实验' }}</button>
+          <button class="btn btn-primary" @click="toggleTrainingCreatePanel"><i class="bi bi-plus-circle me-1"></i>{{ trainingCreateOpen ? '收起创建面板' : '新建训练实验' }}</button>
         </div>
-        <div v-if="trainingCreateOpen" class="training-builder mb-3">
+        <div v-if="trainingCreateOpen" id="training-builder" class="training-builder mb-3">
+          <div v-if="reusedTrainingSource" class="alert alert-info mb-0">
+            <i class="bi bi-copy me-2"></i>已复用 <strong>{{ reusedTrainingSource.version }}</strong> 的模型方案和完整分类器参数；训练集未复用，请在第 2 步重新选择。
+          </div>
           <div class="training-builder-section">
             <span class="training-builder-step">1</span>
             <div class="flex-grow-1"><strong>选择实验方式</strong><div class="training-choice-grid mt-2"><label class="training-choice" :class="{ active: trainingCreateMode === 'single' }"><input v-model="trainingCreateMode" type="radio" value="single"><span><b>单个实验</b><small>只训练一种特征与分类器组合</small></span></label><label class="training-choice" :class="{ active: trainingCreateMode === 'custom' }"><input v-model="trainingCreateMode" type="radio" value="custom"><span><b>自选组别横向对比</b><small>任选 2–7 个模型，共用同一数据快照</small></span></label><label class="training-choice" :class="{ active: trainingCreateMode === 'suite' }"><input v-model="trainingCreateMode" type="radio" value="suite"><span><b>全部七组横向对比</b><small>TF-IDF 基线 + 六组 Embedding 分类器</small></span></label></div><label v-if="trainingCreateMode === 'single'" class="mt-3"><span class="form-label">实验方案</span><select v-model="selectedExperiment" class="form-select"><option v-for="item in experimentDefinitions" :key="item.value" :value="item.value">{{ item.feature }} + {{ item.classifier }}</option></select></label><div v-else-if="trainingCreateMode === 'custom'" class="custom-experiment-panel mt-3"><div class="custom-experiment-heading"><span><b>选择参与对比的模型</b><small>已选择 {{ selectedTrainingExperiments.length }} / {{ experimentDefinitions.length }} 项；至少选择两项</small></span><span class="selection-count" :class="{ 'is-invalid': !trainingSelectionValid }">{{ selectedTrainingExperiments.length }} 项</span></div><div class="custom-experiment-grid"><label v-for="item in experimentDefinitions" :key="`custom-${item.value}`" class="custom-experiment-option" :class="{ active: selectedCustomExperiments.includes(item.value) }"><input type="checkbox" :checked="selectedCustomExperiments.includes(item.value)" @change="toggleCustomExperiment(item.value)"><span><b>{{ item.feature }} + {{ item.classifier }}</b><small>{{ item.title }} · {{ item.hint }}</small></span><i class="bi" :class="selectedCustomExperiments.includes(item.value) ? 'bi-check-circle-fill' : 'bi-circle'"></i></label></div><p v-if="!trainingSelectionValid" class="custom-selection-warning"><i class="bi bi-exclamation-triangle-fill"></i>请再选择至少一个模型，横向对比不能只包含单个模型。</p></div><div v-else class="all-experiment-summary mt-3"><i class="bi bi-check2-all"></i><span><b>已选择全部七组模型</b><small>{{ selectedExperimentNames }}</small></span></div></div>
@@ -1464,15 +1664,23 @@ onBeforeUnmount(() => {
         <div class="model-comparison-grid mb-3">
           <article v-for="item in comparisonJobs" :key="item.value" class="model-comparison-card" :class="{ 'is-best': item.job?.id === bestComparisonJobId }">
             <div class="model-comparison-heading"><span><i class="bi" :class="item.value === 'tfidf_linear_svc' ? 'bi-lightning-charge-fill' : 'bi-diagram-3-fill'"></i></span><div><small>{{ item.title }}</small><strong>{{ item.feature }} + {{ item.classifier }}</strong></div><span v-if="item.job?.id === bestComparisonJobId" class="best-model-badge"><i class="bi bi-trophy-fill"></i>最佳</span><span v-if="item.job?.is_active" class="badge bg-success">生产启用</span></div>
-            <template v-if="item.job"><div class="model-comparison-metrics"><span><small>Macro-F1</small><strong>{{ metric(item.job.metrics?.macro_f1) }}</strong></span><span><small>Accuracy</small><strong>{{ metric(item.job.metrics?.accuracy) }}</strong></span><span><small>Weighted-F1</small><strong>{{ metric(item.job.metrics?.weighted_f1) }}</strong></span></div><div v-if="item.job.id === bestComparisonJobId" class="best-risk-summary" :class="overfitRisk(item.job).tone"><i class="bi" :class="overfitRisk(item.job).level === 'high' ? 'bi-exclamation-triangle-fill' : 'bi-shield-check'"></i><span><b>{{ overfitRisk(item.job).label }}</b><small>训练—折外差距 {{ metric(overfitRisk(item.job).gap) }}</small></span></div><div class="model-parameter-line"><span :class="isManuallyTuned(item.job) ? 'is-manual' : ''">{{ isManuallyTuned(item.job) ? '人工调参' : '默认参数' }}</span><small>{{ parameterSummary(item.job) }}</small></div><div class="model-comparison-footer"><span class="training-status" :class="`is-${item.job.status}`">{{ trainingStatus(item.job) }}</span><button type="button" class="btn btn-sm btn-link" @click="openTrainingJobDetails(item.job)">查看详情</button></div></template>
+            <template v-if="item.job"><div class="model-comparison-metrics"><span><small>Macro-F1</small><strong>{{ metric(item.job.metrics?.macro_f1) }}</strong></span><span><small>Accuracy</small><strong>{{ metric(item.job.metrics?.accuracy) }}</strong></span><span><small>Weighted-F1</small><strong>{{ metric(item.job.metrics?.weighted_f1) }}</strong></span></div><div v-if="item.job.id === bestComparisonJobId" class="best-risk-summary" :class="overfitRisk(item.job).tone"><i class="bi" :class="overfitRisk(item.job).level === 'high' ? 'bi-exclamation-triangle-fill' : 'bi-shield-check'"></i><span><b>{{ overfitRisk(item.job).label }}</b><small>训练—折外差距 {{ metric(overfitRisk(item.job).gap) }}</small></span></div><div class="model-parameter-line"><span :class="isManuallyTuned(item.job) ? 'is-manual' : ''">{{ isManuallyTuned(item.job) ? '人工调参' : '默认参数' }}</span><small>{{ parameterSummary(item.job) }}</small></div><div class="model-comparison-footer"><span class="training-status" :class="`is-${item.job.status}`">{{ trainingStatus(item.job) }}</span><span><button type="button" class="btn btn-sm btn-link" @click="reuseTrainingParameters(item.job)">复用参数</button><button type="button" class="btn btn-sm btn-link" @click="openTrainingJobDetails(item.job)">查看详情</button></span></div></template>
             <div v-else class="model-comparison-empty">尚未创建 · {{ item.hint }}</div>
           </article>
         </div>
         <div v-if="trainingLoading" class="py-4 text-center"><span class="spinner-border text-primary"></span></div>
-        <div v-else-if="trainingJobs.length" class="table-responsive training-table-wrap">
+        <div v-else-if="trainingJobs.length" class="training-record-browser">
+          <div class="training-record-toolbar">
+            <label class="training-record-search"><i class="bi bi-search"></i><input v-model.trim="trainingRecordSearch" class="form-control form-control-sm" type="search" placeholder="搜索版本、数据集或模型"></label>
+            <select v-model="trainingRecordStatus" class="form-select form-select-sm" aria-label="筛选训练记录状态"><option value="all">全部状态</option><option value="active">当前启用</option><option value="running">进行中</option><option value="completed">已完成</option><option value="failed">失败</option><option value="cancelled">已取消</option></select>
+            <span class="training-record-count">共 {{ filteredTrainingVersionGroups.length }} 个版本</span>
+            <button class="btn btn-sm btn-outline-secondary" :disabled="!visibleDeletableTrainingJobIds.length || trainingBusyId === 'batch-delete'" @click="toggleVisibleTrainingSelection">{{ allVisibleDeletableSelected ? '取消选择本页' : '选择本页可删除项' }}</button>
+            <button class="btn btn-sm btn-outline-danger" :disabled="!selectedTrainingJobIds.length || trainingBusyId === 'batch-delete'" @click="deleteSelectedTrainingJobs"><span v-if="trainingBusyId === 'batch-delete'" class="spinner-border spinner-border-sm me-1"></span><i v-else class="bi bi-trash3 me-1"></i>批量清除（{{ selectedTrainingJobIds.length }}）</button>
+          </div>
+          <div v-if="filteredTrainingVersionGroups.length" class="table-responsive training-table-wrap">
           <table class="table align-middle mb-0">
             <thead><tr><th>模型方案</th><th>状态/进度</th><th>样本</th><th>Macro-F1</th><th>Weighted-F1</th><th>Macro-AUC</th><th>创建时间</th><th class="text-end">操作</th></tr></thead>
-            <tbody v-for="group in trainingVersionGroups" :key="group.key" class="training-version-group">
+            <tbody v-for="group in visibleTrainingVersionGroups" :key="group.key" class="training-version-group">
               <tr class="training-group-row">
                 <td colspan="8">
                   <button class="training-group-toggle" :aria-expanded="expandedTrainingGroupKey === group.key" @click="toggleTrainingGroup(group.key)">
@@ -1487,12 +1695,12 @@ onBeforeUnmount(() => {
               <template v-if="expandedTrainingGroupKey === group.key">
                 <template v-for="job in group.jobs" :key="job.id">
                   <tr :id="`training-job-${job.id}`" class="training-job-row" :class="{ 'is-expanded': expandedTrainingJobId === job.id }">
-                    <td><button class="training-version-button" @click="expandedTrainingJobId = expandedTrainingJobId === job.id ? '' : job.id"><i class="bi" :class="expandedTrainingJobId === job.id ? 'bi-chevron-down' : 'bi-chevron-right'"></i><strong>{{ experimentDefinition(job).feature }} + {{ experimentDefinition(job).classifier }}</strong></button><span v-if="job.is_active" class="badge bg-success ms-2">当前启用</span><small class="d-block text-muted">{{ job.version }}<template v-if="job.parent_job_id"> · 重试版本</template></small></td>
+                    <td><div class="training-job-title"><input v-model="selectedTrainingJobIds" class="form-check-input" type="checkbox" :value="job.id" :disabled="!isTrainingJobDeletable(job) || trainingBusyId === 'batch-delete'" :aria-label="`选择训练记录 ${job.version}`"><div><button class="training-version-button" @click="expandedTrainingJobId = expandedTrainingJobId === job.id ? '' : job.id"><i class="bi" :class="expandedTrainingJobId === job.id ? 'bi-chevron-down' : 'bi-chevron-right'"></i><strong>{{ experimentDefinition(job).feature }} + {{ experimentDefinition(job).classifier }}</strong></button><span v-if="job.is_active" class="badge bg-success ms-2">当前启用</span><small class="d-block text-muted">{{ job.version }}<template v-if="job.parent_job_id"> · 重试版本</template></small></div></div></td>
                     <td><span class="training-status" :class="`is-${job.status}`">{{ trainingStatus(job) }}</span><div v-if="job.status === 'running'" class="training-live-progress mt-2" :title="trainingProgressTitle(job)"><div class="training-progress-heading"><span>{{ trainingHeartbeat(job) }}</span><strong>{{ job.progress }}%</strong></div><div class="training-stream-progress" role="progressbar" :aria-label="`${job.version}训练进度`" :aria-valuenow="job.progress" aria-valuemin="0" aria-valuemax="100" :aria-valuetext="trainingProgressTitle(job)"><span :style="{ transform: `scaleX(${job.progress / 100})` }"></span></div><small>{{ trainingEta(job) }}</small></div><small v-if="job.cancel_requested" class="text-warning d-block mt-1">正在等待安全停止点</small><small v-if="job.error_message" class="text-danger d-block mt-1">{{ job.error_message }}</small></td>
                     <td>{{ job.sample_count || '—' }}<small v-if="job.label_distribution" class="d-block text-muted">{{ trainingLabels(job).join('/') }}：{{ trainingLabels(job).map(key => job.label_distribution?.[String(key)] ?? 0).join('/') }}</small></td>
                     <td>{{ metric(job.metrics?.macro_f1) }}</td><td>{{ metric(job.metrics?.weighted_f1) }}</td><td>{{ metric(job.metrics?.macro_auc_ovr) }}</td>
                     <td>{{ formatUpdatedAt(job.created_at) }}</td>
-                    <td class="text-end"><div class="training-actions"><button v-if="job.status === 'completed'" class="btn btn-sm btn-outline-secondary" :disabled="trainingBusyId === job.id" title="导出训练摘要、各类别指标、五折结果、混淆矩阵、完整指标 JSON 与冻结配置" @click="exportTrainingJob(job)"><i class="bi bi-download me-1"></i>导出完整指标 ZIP</button><button v-if="['queued','running'].includes(job.status)" class="btn btn-sm btn-outline-danger" :disabled="trainingBusyId === job.id || job.cancel_requested" @click="cancelTrainingJob(job)">取消</button><button v-if="['failed','cancelled'].includes(job.status)" class="btn btn-sm btn-outline-secondary" :disabled="trainingBusyId === job.id" @click="retryTrainingJob(job)">重新运行</button><button v-if="job.status === 'completed' && !job.is_active" class="btn btn-sm btn-outline-primary" :disabled="trainingBusyId === job.id" @click="activateTrainingJob(job)">{{ trainingJobs.some(item => item.is_active) ? '启用/回滚到此版' : '启用模型' }}</button><template v-else-if="job.is_active"><span class="text-success small fw-semibold">正在使用</span><button class="btn btn-sm btn-outline-danger" :disabled="trainingBusyId === job.id" @click="deactivateTrainingJob(job)">取消启用</button></template></div></td>
+                    <td class="text-end"><div class="training-actions"><button class="btn btn-sm btn-outline-secondary" :disabled="trainingBusyId === job.id" @click="reuseTrainingParameters(job)"><i class="bi bi-copy me-1"></i>复用参数</button><button v-if="job.status === 'completed'" class="btn btn-sm btn-outline-secondary" :disabled="trainingBusyId === job.id" title="导出训练摘要、各类别指标、五折结果、混淆矩阵、完整指标 JSON 与冻结配置" @click="exportTrainingJob(job)"><i class="bi bi-download me-1"></i>导出完整指标 ZIP</button><button v-if="['queued','running'].includes(job.status)" class="btn btn-sm btn-outline-danger" :disabled="trainingBusyId === job.id || job.cancel_requested" @click="cancelTrainingJob(job)">取消</button><button v-if="['failed','cancelled'].includes(job.status)" class="btn btn-sm btn-outline-secondary" :disabled="trainingBusyId === job.id" @click="retryTrainingJob(job)">重新运行</button><button v-if="job.status === 'completed' && !job.is_active" class="btn btn-sm btn-outline-primary" :disabled="trainingBusyId === job.id" @click="activateTrainingJob(job)">{{ trainingJobs.some(item => item.is_active) ? '启用/回滚到此版' : '启用模型' }}</button><template v-else-if="job.is_active"><span class="text-success small fw-semibold">正在使用</span><button class="btn btn-sm btn-outline-danger" :disabled="trainingBusyId === job.id" @click="deactivateTrainingJob(job)">取消启用</button></template><button v-if="!job.is_active && ['completed','failed','cancelled'].includes(job.status)" class="btn btn-sm btn-outline-danger" :disabled="trainingBusyId === job.id" @click="deleteTrainingJob(job)"><i class="bi bi-trash3 me-1"></i>清除记录</button></div></td>
                   </tr>
                   <tr v-if="expandedTrainingJobId === job.id" class="training-detail-row"><td colspan="8">
                     <div class="training-detail-grid">
@@ -1523,6 +1731,9 @@ onBeforeUnmount(() => {
               </template>
             </tbody>
           </table>
+          </div>
+          <div v-else class="training-record-empty"><i class="bi bi-search"></i><span>没有符合当前条件的训练记录</span><button class="btn btn-sm btn-link" @click="trainingRecordSearch = ''; trainingRecordStatus = 'all'">清除筛选</button></div>
+          <nav v-if="filteredTrainingVersionGroups.length && trainingRecordPageCount > 1" class="training-record-pagination" aria-label="训练记录分页"><button class="btn btn-sm btn-outline-secondary" :disabled="trainingRecordPage === 1" @click="trainingRecordPage--"><i class="bi bi-chevron-left"></i>上一页</button><span>第 {{ trainingRecordPage }} / {{ trainingRecordPageCount }} 页</span><button class="btn btn-sm btn-outline-secondary" :disabled="trainingRecordPage === trainingRecordPageCount" @click="trainingRecordPage++">下一页<i class="bi bi-chevron-right"></i></button></nav>
         </div>
         <div v-else class="text-muted text-center py-4">尚未创建训练任务</div>
         <details class="training-audit mt-3"><summary>模型训练与发布审计（{{ trainingAudits.length }}）</summary><div v-if="trainingAuditLoading" class="py-3 text-center"><span class="spinner-border spinner-border-sm"></span></div><div v-else class="audit-list mt-3"><article v-for="item in trainingAudits" :key="item.id" class="audit-row"><span class="audit-icon"><i class="bi bi-clock-history"></i></span><div><strong>{{ trainingAuditLabel(item.action) }}</strong><small class="d-block text-muted">{{ item.version || item.job_id || '系统任务' }}</small></div><div class="audit-meta"><span>{{ item.actor_name || '系统 Worker' }}</span><time>{{ formatUpdatedAt(item.created_at) }}</time></div></article><p v-if="!trainingAudits.length" class="text-muted small mb-0">暂无模型训练操作记录。</p></div></details>
@@ -2369,6 +2580,16 @@ onBeforeUnmount(() => {
 .loss-model-note strong { font-size: .68rem; }
 .loss-model-note p { margin: .25rem 0 0; color: var(--color-text-muted); font-size: .64rem; line-height: 1.5; }
 .training-summary-metrics { display: grid; grid-template-columns: repeat(5,minmax(0,1fr)); gap: .5rem; }
+.training-record-browser { display: grid; gap: .75rem; }
+.training-record-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: .55rem; padding: .7rem; border: 1px solid var(--color-border); border-radius: 12px; background: var(--color-surface-subtle); }
+.training-record-search { position: relative; flex: 1 1 250px; max-width: 390px; }
+.training-record-search i { position: absolute; top: 50%; left: .65rem; z-index: 1; color: var(--color-text-muted); transform: translateY(-50%); }
+.training-record-search input { padding-left: 2rem; }
+.training-record-toolbar select { flex: 0 0 140px; }
+.training-record-count { margin-right: auto; color: var(--color-text-muted); font-size: .75rem; white-space: nowrap; }
+.training-record-empty { display: flex; align-items: center; justify-content: center; gap: .45rem; min-height: 112px; border: 1px dashed var(--color-border); border-radius: 12px; color: var(--color-text-muted); }
+.training-record-pagination { display: flex; align-items: center; justify-content: center; gap: .8rem; }
+.training-record-pagination > span { color: var(--color-text-muted); font-size: .75rem; font-variant-numeric: tabular-nums; }
 .training-table-wrap { border: 1px solid var(--color-border); border-radius: 12px; }
 .training-version-group + .training-version-group .training-group-row > td { border-top: 6px solid color-mix(in srgb,var(--color-surface-subtle) 78%,var(--color-border)); }
 .training-group-row > td { padding: 0 !important; background: color-mix(in srgb,var(--color-primary-soft) 24%,var(--color-surface)); }
@@ -2385,6 +2606,8 @@ onBeforeUnmount(() => {
 .training-group-progress { color: var(--color-text-secondary); background: var(--color-surface-subtle); }
 .training-group-active { color: var(--color-success); background: var(--color-success-soft); }
 .training-group-toggle time { color: var(--color-text-muted); font-size: .7rem; font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
+.training-job-title { display: flex; align-items: flex-start; gap: .55rem; }
+.training-job-title > input { flex: 0 0 auto; margin-top: .3rem; }
 .training-job-row { scroll-margin-top:96px; }
 .training-job-row > td { background: color-mix(in srgb,var(--color-surface) 96%,transparent); transition:background-color 180ms cubic-bezier(.23,1,.32,1); }
 .training-job-row.is-expanded > td { background:color-mix(in srgb,var(--color-primary-soft) 44%,var(--color-surface)); }

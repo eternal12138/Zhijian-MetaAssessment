@@ -5,10 +5,12 @@ import unittest
 
 import joblib
 import numpy as np
+from fastapi import HTTPException
 
+from app.api.model_training import _delete_training_jobs, _managed_artifact_directory, delete_job
 from app.config import Settings
 from app.models.research import ModelTrainingJob
-from app.schemas.model_training import TrainingJobCreate, TrainingSuiteCreate
+from app.schemas.model_training import TrainingJobCreate, TrainingJobsDeleteIn, TrainingSuiteCreate
 from app.services.model_artifacts import load_model_artifact, sha256_file
 from app.services.model_inference import _probe_embedding_features
 from app.services.model_training import (
@@ -54,6 +56,13 @@ class ModelTrainingLifecycleTests(unittest.TestCase):
             TrainingSuiteCreate(version_prefix="模型/第一轮")
         with self.assertRaises(ValueError):
             TrainingSuiteCreate(version_prefix="模型 第一轮")
+
+    def test_batch_delete_ids_must_be_unique_and_non_empty(self):
+        self.assertEqual(TrainingJobsDeleteIn(job_ids=[" job-1 "]).job_ids, ["job-1"])
+        with self.assertRaises(ValueError):
+            TrainingJobsDeleteIn(job_ids=["job-1", "job-1"])
+        with self.assertRaises(ValueError):
+            TrainingJobsDeleteIn(job_ids=[])
 
     def test_activation_probe_accepts_numpy_embedding_matrix(self):
         vectors = np.ones((1, 4), dtype=np.float32)
@@ -143,19 +152,30 @@ class ModelTrainingLifecycleTests(unittest.TestCase):
             build_remote_embedding_linear_svc(hyperparameters=embedding_parameters).class_weight
         )
 
-    def test_xgboost_tree_count_and_min_child_weight_are_tunable(self):
+    def test_xgboost_complexity_parameters_are_tunable_and_documented(self):
         catalog = public_hyperparameter_catalog()["embedding_xgboost"]
         self.assertIn("n_estimators", catalog["parameters"])
-        self.assertIn("min_child_weight", catalog["parameters"])
+        for name in ("max_depth", "min_child_weight", "gamma", "reg_lambda"):
+            self.assertIn(name, catalog["parameters"])
+            self.assertTrue(catalog["parameters"][name]["description"].strip())
         parameters, tuned = normalize_hyperparameters(
-            "embedding_xgboost", {"n_estimators": 200, "min_child_weight": 2.5},
+            "embedding_xgboost", {
+                "n_estimators": 200,
+                "max_depth": 5,
+                "min_child_weight": 2.5,
+                "gamma": 0.3,
+                "reg_lambda": 1.5,
+            },
         )
         self.assertTrue(tuned)
         self.assertEqual(parameters["n_estimators"], 200)
         self.assertEqual(parameters["min_child_weight"], 2.5)
         classifier = build_remote_embedding_xgboost(hyperparameters=parameters)
         self.assertEqual(classifier.estimator.n_estimators, 200)
+        self.assertEqual(classifier.estimator.max_depth, 5)
         self.assertEqual(classifier.estimator.min_child_weight, 2.5)
+        self.assertEqual(classifier.estimator.gamma, 0.3)
+        self.assertEqual(classifier.estimator.reg_lambda, 1.5)
 
     def test_new_boosting_classifiers_fit_predict_and_reload(self):
         features = np.asarray([
@@ -265,6 +285,22 @@ class ModelTrainingLifecycleTests(unittest.TestCase):
             job.artifact_sha256 = "0" * 64
             with self.assertRaisesRegex(ValueError, "完整性"):
                 load_model_artifact(job, settings)
+
+    def test_training_record_cleanup_is_limited_to_managed_version_directory(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            managed = root / "v1" / "model.joblib"
+            managed.parent.mkdir()
+            managed.touch()
+            job = ModelTrainingJob(
+                version="v1", requested_by="admin", artifact_path=str(managed),
+            )
+            self.assertEqual(_managed_artifact_directory(job, root), root / "v1")
+
+            outside = root.parent / "outside-model.joblib"
+            job.artifact_path = str(outside)
+            job.version = "../outside"
+            self.assertIsNone(_managed_artifact_directory(job, root))
 
     def test_tfidf_uses_group_folds_and_returns_complete_metrics(self):
         samples = self.synthetic_samples()
@@ -470,6 +506,88 @@ class ModelTrainingLifecycleTests(unittest.TestCase):
             source.write_text("VERSION = 2", encoding="utf-8")
             second = source_revision((source,))
         self.assertNotEqual(first, second)
+
+
+class _TrainingDeleteDb:
+    def __init__(self, job):
+        self.job = job
+        self.added = []
+        self.deleted = []
+        self.committed = False
+
+    async def scalar(self, _statement):
+        return self.job
+
+    def add(self, item):
+        self.added.append(item)
+
+    async def delete(self, item):
+        self.deleted.append(item)
+
+    async def commit(self):
+        self.committed = True
+
+
+class ModelTrainingDeleteTests(unittest.IsolatedAsyncioTestCase):
+    async def test_terminal_inactive_record_can_be_deleted(self):
+        job = SimpleNamespace(
+            id="delete-job", version="deleted-v1", status="failed",
+            is_active=False, artifact_path=None,
+        )
+        db = _TrainingDeleteDb(job)
+
+        result = await delete_job(
+            job.id, db=db, user=SimpleNamespace(id="admin-1")
+        )
+
+        self.assertEqual(result["status"], "deleted")
+        self.assertEqual(db.deleted, [job])
+        self.assertTrue(db.committed)
+
+    async def test_active_record_cannot_be_deleted(self):
+        job = SimpleNamespace(
+            id="active-job", version="active-v1", status="completed",
+            is_active=True, artifact_path=None,
+        )
+        with self.assertRaises(HTTPException) as context:
+            await delete_job(
+                job.id,
+                db=_TrainingDeleteDb(job),
+                user=SimpleNamespace(id="admin-1"),
+            )
+        self.assertEqual(context.exception.status_code, 409)
+
+    async def test_batch_delete_validates_every_record_before_deleting(self):
+        terminal = SimpleNamespace(
+            id="terminal-job", version="terminal-v1", status="failed",
+            is_active=False, artifact_path=None,
+        )
+        running = SimpleNamespace(
+            id="running-job", version="running-v1", status="running",
+            is_active=False, artifact_path=None,
+        )
+        db = _TrainingDeleteDb(None)
+        with self.assertRaises(HTTPException) as context:
+            await _delete_training_jobs(
+                [terminal, running], db, SimpleNamespace(id="admin-1"),
+            )
+        self.assertEqual(context.exception.status_code, 409)
+        self.assertEqual(db.deleted, [])
+        self.assertFalse(db.committed)
+
+    async def test_batch_delete_removes_all_terminal_records(self):
+        jobs = [
+            SimpleNamespace(
+                id=f"delete-{index}", version=f"deleted-v{index}", status="completed",
+                is_active=False, artifact_path=None,
+            )
+            for index in range(2)
+        ]
+        db = _TrainingDeleteDb(None)
+        result = await _delete_training_jobs(jobs, db, SimpleNamespace(id="admin-1"))
+        self.assertEqual([item["job_id"] for item in result], ["delete-0", "delete-1"])
+        self.assertEqual(db.deleted, jobs)
+        self.assertTrue(db.committed)
 
 
 if __name__ == "__main__":

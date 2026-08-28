@@ -816,12 +816,12 @@ onMounted(loadPage)
                       <td class="font-monospace" data-label="账号">{{ item.username || item.user_id.slice(0, 8) }}</td>
                       <td data-label="得分">{{ item.score.toFixed(1) }}</td>
                       <td data-label="状态"><span class="badge bg-light text-dark">{{ reportStatusLabel(item.status) }}</span></td>
-                      <td data-label="待复核 / 双评">{{ item.requires_review_count }} / {{ item.double_review_pending }}</td>
+                      <td data-label="待复核 / 双评">{{ item.requires_review_count }} / {{ item.double_review_pending === null ? '未建批次' : item.double_review_pending }}</td>
                       <td class="text-end" data-label="操作">
                         <button
                           v-if="item.status !== 'published'"
                           class="btn btn-sm btn-success"
-                          :disabled="item.requires_review_count > 0 || item.double_review_pending > 0 || !['eligible', 'included', 'included_override'].includes(item.quality_status) || publishingId === item.id"
+                          :disabled="item.requires_review_count > 0 || item.double_review_pending === null || item.double_review_pending > 0 || !['eligible', 'included', 'included_override'].includes(item.quality_status) || publishingId === item.id"
                           @click="publish(item.id)"
                         >
                           发布

@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import asyncio
+import csv
+import io
 import logging
 import math
 import time
@@ -10,7 +12,7 @@ from datetime import timedelta
 from urllib.parse import urlencode
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from sqlalchemy import and_, case, func, literal, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import defer, selectinload
@@ -55,6 +57,55 @@ PIPELINE_STATUSES = [
 def _require_reviewer(user: User) -> None:
     if user.role not in {"teacher", "admin"}:
         raise HTTPException(status_code=403, detail="仅教师或管理员可复核候选片段")
+
+
+def _candidate_review_csv(
+    *,
+    session: AssessmentSession,
+    owner: User,
+    task: AssessmentTask,
+    version: TranscriptVersion,
+    job: ExtractionJob,
+    rows: list[tuple[ExtractionCandidate, str | None]],
+) -> str:
+    """Serialize one immutable extraction generation's final review audit."""
+    def spreadsheet_safe(value: object) -> object:
+        if isinstance(value, str) and value.lstrip().startswith(("=", "+", "-", "@")):
+            return "'" + value
+        return value
+
+    stream = io.StringIO(newline="")
+    writer = csv.writer(stream)
+    review_complete = job.status == "reviewed" and all(
+        candidate.review_status != "pending" for candidate, _reviewer_name in rows
+    )
+    writer.writerow([
+        "测评轮次ID", "会话ID", "任务ID", "任务名称", "学生ID", "学生姓名", "学生账号",
+        "权威转录版本ID", "权威转录版本号", "权威转录来源",
+        "抽取任务ID", "抽取代次", "抽取模型", "抽取器版本", "提示词版本", "复核版本状态", "是否最终结果",
+        "候选ID", "候选序号", "候选来源", "人工复核结论",
+        "原始文本", "人工校订文本", "复核备注", "复核人ID", "复核人姓名", "复核时间",
+        "来源转录片段ID", "开始毫秒", "结束毫秒",
+        "分类标签", "分类维度", "分类置信度", "分类模型版本", "分类来源", "分类状态", "分类错误",
+    ])
+    for candidate, reviewer_name in rows:
+        writer.writerow(spreadsheet_safe(value) for value in [
+            session.run_id or "", session.id, task.id, task.title,
+            owner.id, owner.name, owner.username,
+            version.id, version.version_no, version.source,
+            job.id, job.generation_no, job.model, job.extractor_version, job.prompt_version,
+            job.status, "是" if review_complete else "否（未完成快照）",
+            candidate.id, candidate.sequence_no, candidate.source_type, candidate.review_status,
+            candidate.original_text, candidate.clean_text, candidate.review_note,
+            candidate.reviewer_id or "", reviewer_name or "", candidate.reviewed_at or "",
+            candidate.source_transcript_segment_id or "", candidate.started_at_ms, candidate.ended_at_ms,
+            candidate.predicted_label if candidate.predicted_label is not None else "",
+            candidate.predicted_dimension or "",
+            candidate.prediction_confidence if candidate.prediction_confidence is not None else "",
+            candidate.classifier_version or "", candidate.prediction_source or "",
+            candidate.classification_status, candidate.classification_error,
+        ])
+    return "\ufeff" + stream.getvalue()
 
 
 async def _session_context(session_id: str, user: User, db: AsyncSession):
@@ -647,6 +698,60 @@ async def acquire_review_lock(
     )
 
 
+@router.get("/sessions/{session_id}/review-export")
+async def export_candidate_review_result(
+    session_id: str,
+    job_id: str | None = Query(default=None),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Export all accepted/rejected decisions for one completed review version."""
+    _require_reviewer(user)
+    session, owner, task, version = await _context(session_id, user, db)
+    if job_id:
+        job = await db.get(ExtractionJob, job_id)
+        if job is None or job.session_id != session.id:
+            raise HTTPException(status_code=404, detail="候选抽取版本不存在")
+    else:
+        job = await _latest_job(version.id, db)
+    if job is None:
+        raise HTTPException(status_code=404, detail="该会话尚无候选抽取版本")
+    export_version = await db.get(TranscriptVersion, job.transcript_version_id)
+    if export_version is None or export_version.session_id != session.id:
+        raise HTTPException(status_code=409, detail="抽取版本关联的权威转录已不存在")
+
+    rows = list((await db.execute(
+        select(ExtractionCandidate, User.name)
+        .outerjoin(User, User.id == ExtractionCandidate.reviewer_id)
+        .where(
+            ExtractionCandidate.extraction_job_id == job.id,
+        )
+        .order_by(ExtractionCandidate.sequence_no.asc(), ExtractionCandidate.id.asc())
+    )).all())
+    if not rows:
+        raise HTTPException(status_code=409, detail="当前抽取版本尚无候选，不能导出")
+    review_complete = job.status == "reviewed" and all(
+        candidate.review_status != "pending" for candidate, _reviewer_name in rows
+    )
+    content = _candidate_review_csv(
+        session=session,
+        owner=owner,
+        task=task,
+        version=export_version,
+        job=job,
+        rows=rows,
+    )
+    return Response(
+        content=content.encode("utf-8"),
+        media_type="text/csv; charset=utf-8",
+        headers={
+            "Content-Disposition": f'attachment; filename="candidate-review-{"final" if review_complete else "snapshot"}-{job.id}.csv"',
+            "X-Export-Row-Count": str(len(rows)),
+            "X-Review-Complete": "true" if review_complete else "false",
+        },
+    )
+
+
 @router.post("/sessions/{session_id}/lock/renew", response_model=ReviewLeaseOut)
 async def renew_review_lock(
     session_id: str, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
@@ -1007,6 +1112,21 @@ async def complete_candidate_review(
     )) or 0
     if accepted == 0:
         raise HTTPException(status_code=409, detail="至少需要确认一条候选，或人工补充遗漏")
+    unclassified = await db.scalar(select(func.count(ExtractionCandidate.id)).where(
+        ExtractionCandidate.extraction_job_id == job.id,
+        ExtractionCandidate.review_status == "accepted",
+        or_(
+            ExtractionCandidate.predicted_dimension.is_(None),
+            ExtractionCandidate.classification_status.not_in(
+                ("classified", "classified_with_fallback")
+            ),
+        ),
+    )) or 0
+    if unclassified:
+        raise HTTPException(
+            status_code=409,
+            detail=f"仍有 {unclassified} 条已接受候选缺少有效三维分类，请先重新分类",
+        )
     job.status = "reviewed"
     job.review_lock_user_id = None
     job.review_lock_acquired_at = None

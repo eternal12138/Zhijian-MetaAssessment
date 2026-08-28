@@ -2,7 +2,12 @@
 import { computed, nextTick, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import RadarChart from '../components/charts/RadarChart.vue'
-import { reportApi, type ReportBrief, type ReportDetail } from '../api/reports'
+import {
+  reportApi,
+  type MetacognitionMeasurement,
+  type ReportBrief,
+  type ReportDetail
+} from '../api/reports'
 import type { DimensionScore } from '../types/assessment'
 import AppEmptyState from '../components/ui/AppEmptyState.vue'
 import AppPageHeader from '../components/ui/AppPageHeader.vue'
@@ -16,30 +21,31 @@ const waitingForPublication = ref(false)
 const errorMessage = ref('')
 const highlightedDimension = ref('')
 const enableComparison = ref(false)
-const comparisonReport = ref<ReportDetail | null>(null)
+const measurementHistory = ref<MetacognitionMeasurement[]>([])
+const selectedMeasurement = ref<MetacognitionMeasurement | null>(null)
+const comparisonMeasurement = ref<MetacognitionMeasurement | null>(null)
+const measurementError = ref('')
 
-const radarScores = computed<DimensionScore[]>(() =>
-  (report.value?.dimension_details ?? []).map(item => ({
-    dimension: item.dimension,
-    label: item.label,
-    score: item.score,
-    max: 100
-  }))
-)
+function measurementRadarScores(measurement: MetacognitionMeasurement | null): DimensionScore[] {
+  if (!measurement?.score_available) return []
+  const rows: Array<{ dimension: DimensionScore['dimension']; label: string; score: number | null }> = [
+    { dimension: 'monitoring', label: '监控', score: measurement.dimension_scores.monitoring },
+    { dimension: 'controlDebugging', label: '控制/调试', score: measurement.dimension_scores.control_debugging },
+    { dimension: 'evaluation', label: '评估', score: measurement.dimension_scores.evaluation }
+  ]
+  return rows.flatMap(item => item.score === null ? [] : [{ ...item, score: item.score, max: 1 }])
+}
+
+const radarScores = computed<DimensionScore[]>(() => measurementRadarScores(selectedMeasurement.value))
 
 const comparisonScores = computed<DimensionScore[]>(() => {
-  if (!enableComparison.value || !comparisonReport.value) return []
-  return (comparisonReport.value.dimension_details ?? []).map(item => ({
-    dimension: item.dimension,
-    label: item.label,
-    score: item.score,
-    max: 100
-  }))
+  if (!enableComparison.value) return []
+  return measurementRadarScores(comparisonMeasurement.value)
 })
 
 const comparisonLabel = computed(() => {
-  if (!comparisonReport.value) return '上次测评'
-  return `${formatDate(comparisonReport.value.generated_at)} (${comparisonReport.value.level})`
+  if (!comparisonMeasurement.value) return '上次测量'
+  return formatDate(comparisonMeasurement.value.completed_at)
 })
 
 const methodLabel = computed(() => {
@@ -88,21 +94,18 @@ function evidenceStrength(confidence: number) {
   return '有限'
 }
 
+function formatMeasurementScore(score: number | null) {
+  return score === null ? '暂无' : `${(score * 100).toFixed(1)}%`
+}
+
 async function loadReportById(reportId: string) {
   const response = await reportApi.get(reportId)
   report.value = response.data
-
-  // 尝试预加载上一份测评作为对比候选
-  const otherReport = reports.value.find(item => item.id !== reportId)
-  if (otherReport) {
-    try {
-      const compRes = await reportApi.get(otherReport.id)
-      comparisonReport.value = compRes.data
-    } catch {
-      comparisonReport.value = null
-    }
-  } else {
-    comparisonReport.value = null
+  selectedMeasurement.value = measurementHistory.value.find(item => item.run_id === report.value?.run_id) ?? null
+  comparisonMeasurement.value = measurementHistory.value.find(item => (
+    item.run_id !== report.value?.run_id && item.score_available
+  )) ?? null
+  if (!comparisonMeasurement.value) {
     enableComparison.value = false
   }
 }
@@ -112,11 +115,24 @@ async function loadPage() {
   errorMessage.value = ''
   report.value = null
   waitingForPublication.value = false
+  measurementError.value = ''
   highlightedDimension.value = ''
   const runId = typeof route.query.run === 'string' ? route.query.run : ''
   try {
-    const response = await reportApi.list()
-    reports.value = response.data
+    const [reportResult, measurementResult] = await Promise.allSettled([
+      reportApi.list(),
+      reportApi.listMetacognitionMeasurements()
+    ])
+    if (reportResult.status === 'rejected') throw reportResult.reason
+    reports.value = reportResult.value.data
+    if (measurementResult.status === 'fulfilled') {
+      measurementHistory.value = measurementResult.value.data.items
+    } else {
+      measurementHistory.value = []
+      measurementError.value = measurementResult.reason instanceof Error
+        ? measurementResult.reason.message
+        : '三维测量结果加载失败'
+    }
     if (runId) {
       const requestedReport = reports.value.find(item => item.run_id === runId)
       if (requestedReport) {
@@ -284,12 +300,12 @@ watch(() => route.query.run, loadPage, { immediate: true })
             <div class="card-body p-4">
               <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-2">
                 <div>
-                  <h5 class="mb-0">三维元认知画像</h5>
+                  <h5 class="mb-0">元认知三维测量画像</h5>
                   <p class="text-muted small mb-0">
-                    点击维度可联动定位支撑证据；悬浮查看详细分值。
+                    各维度为最终标签命中数 ÷ 本轮最终有效对话数；悬浮查看百分比。
                   </p>
                 </div>
-                <div v-if="comparisonReport" class="form-check form-switch mb-0">
+                <div v-if="comparisonMeasurement" class="form-check form-switch mb-0">
                   <input
                     id="compare-switch"
                     v-model="enableComparison"
@@ -302,15 +318,31 @@ watch(() => route.query.run, loadPage, { immediate: true })
                   </label>
                 </div>
               </div>
-              <RadarChart
-                :scores="radarScores"
-                name="本次测评"
-                :comparison-scores="comparisonScores"
-                :comparison-name="comparisonLabel"
-                :height="320"
-                :show-norm="false"
-                @select-dimension="onSelectDimension"
-              />
+              <div v-if="measurementError" class="alert alert-danger mb-0">{{ measurementError }}</div>
+              <div v-else-if="!selectedMeasurement?.score_available" class="measurement-empty">
+                <i class="bi bi-radar" />
+                <strong>本轮暂无足够的有效对话数据</strong>
+                <p>暂不能生成元认知三维画像，系统不会显示三个 0 分或演示数据。</p>
+              </div>
+              <template v-else>
+                <RadarChart
+                  :scores="radarScores"
+                  name="本次测量"
+                  :comparison-scores="comparisonScores"
+                  :comparison-name="comparisonLabel"
+                  :height="320"
+                  :show-norm="false"
+                  :global-max="1"
+                  :display-as-percentage="true"
+                  @select-dimension="onSelectDimension"
+                />
+                <div class="measurement-score-grid">
+                  <div><span>监控</span><strong>{{ formatMeasurementScore(selectedMeasurement.dimension_scores.monitoring) }}</strong><small>{{ selectedMeasurement.dimension_counts.monitoring }} 条</small></div>
+                  <div><span>控制/调试</span><strong>{{ formatMeasurementScore(selectedMeasurement.dimension_scores.control_debugging) }}</strong><small>{{ selectedMeasurement.dimension_counts.control_debugging }} 条</small></div>
+                  <div><span>评估</span><strong>{{ formatMeasurementScore(selectedMeasurement.dimension_scores.evaluation) }}</strong><small>{{ selectedMeasurement.dimension_counts.evaluation }} 条</small></div>
+                  <div><span>有效对话</span><strong>{{ selectedMeasurement.effective_dialogue_count }}</strong><small>条</small></div>
+                </div>
+              </template>
             </div>
           </div>
         </div>
@@ -392,6 +424,14 @@ watch(() => route.query.run, loadPage, { immediate: true })
 .report-page { max-width: 1240px; margin: 0 auto; }
 .report-select { width: min(320px, 100%); }
 .report-print-header { display: none; }
+.measurement-empty { min-height: 260px; display: grid; place-items: center; align-content: center; gap: .65rem; text-align: center; color: var(--color-text-muted); }
+.measurement-empty i { font-size: 2.3rem; color: var(--color-primary); }
+.measurement-empty strong { color: var(--color-text); }
+.measurement-empty p { margin: 0; max-width: 480px; }
+.measurement-score-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .6rem; }
+.measurement-score-grid > div { display: grid; gap: .1rem; padding: .65rem; border: 1px solid var(--color-border); border-radius: var(--radius-md); background: var(--color-surface-subtle); text-align: center; }
+.measurement-score-grid span, .measurement-score-grid small { color: var(--color-text-muted); font-size: .75rem; }
+.measurement-score-grid strong { color: var(--color-text); }
 .card { border-radius: var(--radius-xl); transition: border-color var(--motion-fast) ease, box-shadow var(--motion-fast) ease, transform var(--motion-fast) ease; }
 .score-ring {
   width: 150px;
@@ -454,6 +494,7 @@ watch(() => route.query.run, loadPage, { immediate: true })
   .source-score strong { text-align: right; }
   .evidence-item { padding: .75rem; word-break: break-word; }
   .recommendation { padding: 1rem; }
+  .measurement-score-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
 @media print {

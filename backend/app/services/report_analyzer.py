@@ -66,6 +66,16 @@ def _normalize(raw_score: float) -> float:
     return round(max(0.0, min(100.0, (raw_score - 1.0) / 6.0 * 100.0)), 1)
 
 
+def _fallback_behavior_score(code: CodedSegment) -> float | None:
+    """Return the AI score used before a fixed blinded batch is completed.
+
+    ``human_score`` belongs to the retired single-review workflow.  Keeping this
+    choice in one named function makes it harder to accidentally reintroduce
+    legacy scores into report generation.
+    """
+    return float(code.score) if code.score is not None else None
+
+
 def _interpret(score: float, has_behavior: bool) -> str:
     suffix = "；包含出声思维行为证据" if has_behavior else "；当前主要依据任务后问卷"
     if score >= 85:
@@ -215,7 +225,7 @@ async def analyze_transcripts(
         )
         existing = []
     if existing:
-        return "human_reviewed" if any(code.human_score for code in existing) else "existing"
+        return "existing"
 
     item_result = await db.execute(
         select(ScaleItem)
@@ -311,7 +321,7 @@ async def generate_run_report(
         for code in code_result.scalars().all()
         if (
             code.dimension in DIMENSIONS
-            and (code.score is not None or code.human_score is not None)
+            and code.score is not None
         )
     ]
     coding_batch_result = await db.execute(
@@ -372,7 +382,14 @@ async def generate_run_report(
                 behavioral[mapped_dimension].append(1.0)
     else:
         for code in codes:
-            behavioral[code.dimension].append(float(code.human_score or code.score))
+            # The retired single-review workflow wrote ``human_score`` directly
+            # onto CodedSegment.  Those historical values are not authoritative
+            # in the fixed blinded-batch workflow and must never silently alter
+            # a newly generated report.  Until a record is explicitly migrated
+            # into a resolved CodingUnit, the AI score remains the only fallback.
+            fallback_score = _fallback_behavior_score(code)
+            if fallback_score is not None:
+                behavioral[code.dimension].append(fallback_score)
 
     details: list[dict] = []
     for dimension in DIMENSIONS:
@@ -460,10 +477,7 @@ async def generate_run_report(
     review_count = (
         0
         if consensus_units
-        else sum(
-            1 for code in codes
-            if code.needs_review and code.human_score is None
-        )
+        else sum(1 for code in codes if code.needs_review)
     )
     behavioral_count = len(codes)
     evidence_source = (
@@ -525,9 +539,7 @@ async def generate_run_report(
     profile.requires_review_count = review_count
     profile.is_provisional = True
     profile.workflow_status = "review_pending" if review_count else (
-        "reviewed"
-        if consensus_units or any(code.human_score is not None for code in codes)
-        else "draft"
+        "reviewed" if consensus_units else "draft"
     )
     profile.template_version = f"v1:{report_prompt_version}"
     profile.generated_at = utc_now_naive()

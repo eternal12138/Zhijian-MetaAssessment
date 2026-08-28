@@ -14,7 +14,6 @@ from app.api.research import (
 from app.models.session import TranscriptSegment
 from sqlalchemy import select
 from app.schemas.research import (
-    AnnotationIn,
     CodingUnitAdjudicationIn,
     CodingUnitAnnotationIn,
     CodingBatchCreateIn,
@@ -29,12 +28,6 @@ class ResearchWorkflowTest(unittest.TestCase):
         self.assertIn("{overall_score}", DEFAULT_TEMPLATES["report_prompt"]["content"])
         self.assertIn("{dimension_results}", DEFAULT_TEMPLATES["report_prompt"]["content"])
         self.assertIn("{segments}", DEFAULT_TEMPLATES["metacognitive_extractor"]["content"])
-
-    def test_annotation_rejects_unknown_dimension_and_invalid_score(self):
-        with self.assertRaises(ValidationError):
-            AnnotationIn(dimension="planning", score=4)
-        with self.assertRaises(ValidationError):
-            AnnotationIn(dimension="monitoring", score=8)
 
     def test_template_kind_is_constrained(self):
         with self.assertRaises(ValidationError):
