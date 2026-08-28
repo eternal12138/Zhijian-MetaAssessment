@@ -97,7 +97,7 @@ def main() -> None:
                 cursor.execute(
                     """ALTER TABLE model_training_jobs
                     ADD COLUMN active_scope TINYINT
-                    GENERATED ALWAYS AS (IF(`is_active`, 1, NULL)) STORED"""
+                    GENERATED ALWAYS AS (CASE WHEN is_active THEN 1 ELSE NULL END) STORED"""
                 )
                 cursor.execute(
                     """SELECT id FROM model_training_jobs

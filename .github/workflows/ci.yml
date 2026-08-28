@@ -25,10 +25,31 @@ jobs:
           cache: pnpm
           cache-dependency-path: frontend/pnpm-lock.yaml
       - run: pnpm install --frozen-lockfile
+      - run: node --test tests/*.test.mjs
       - run: pnpm build
 
   backend-and-research:
     runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: ci-test-only-password
+          MYSQL_ROOT_HOST: '%'
+          MYSQL_DATABASE: metacognition_ci
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 --silent"
+          --health-interval=10s --health-timeout=5s --health-retries=12
+    env:
+      APP_DEBUG: 'true'
+      DB_HOST: 127.0.0.1
+      DB_PORT: '3306'
+      DB_USER: root
+      DB_PASSWORD: ci-test-only-password
+      DB_NAME: metacognition_ci
+      MIGRATION_TEST_MYSQL: '1'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -41,7 +62,21 @@ jobs:
       - name: Backend tests
         working-directory: backend
         run: python -m unittest discover -s tests -p 'test_*.py'
+
+  research:
+    runs-on: ubuntu-latest
+    env:
+      PYTHONPATH: ${{ github.workspace }}:${{ github.workspace }}/research:${{ github.workspace }}/backend
+      MPLBACKEND: Agg
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: pip
+          cache-dependency-path: |
+            backend/requirements.txt
+            research/requirements-training.txt
+      - run: python -m pip install -r backend/requirements.txt -r research/requirements-training.txt
       - name: Research pipeline tests
-        env:
-          PYTHONPATH: ${{ github.workspace }}:${{ github.workspace }}/research:${{ github.workspace }}/backend
         run: python -m unittest discover -s research/tests -p 'test_*.py'

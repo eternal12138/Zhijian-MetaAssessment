@@ -2,12 +2,30 @@ from pathlib import Path
 import unittest
 
 import yaml
+from scripts.migrate_all import SCRIPTS as MIGRATION_SCRIPTS
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 class DeploymentConfigTests(unittest.TestCase):
+    def test_ci_runs_research_independently_with_its_dependencies(self):
+        workflow = yaml.safe_load((PROJECT_ROOT / '.github/workflows/ci.yml').read_text())
+        research = workflow['jobs']['research']
+        self.assertNotIn('needs', research)
+        commands = '\n'.join(step.get('run', '') for step in research['steps'])
+        self.assertIn('-r research/requirements-training.txt', commands)
+        self.assertIn('discover -s research/tests', commands)
+
+    def test_ci_runs_frontend_regressions_and_isolated_mysql_migrations(self):
+        workflow = yaml.safe_load((PROJECT_ROOT / '.github/workflows/ci.yml').read_text())
+        commands = '\n'.join(step.get('run', '') for step in workflow['jobs']['frontend']['steps'])
+        self.assertIn('node --test tests/*.test.mjs', commands)
+        backend = workflow['jobs']['backend-and-research']
+        self.assertEqual(backend['services']['mysql']['image'], 'mysql:8.4')
+        self.assertEqual(backend['env']['MIGRATION_TEST_MYSQL'], '1')
+        self.assertEqual(backend['env']['DB_HOST'], '127.0.0.1')
+
     def test_backend_image_uses_domestic_debian_mirror(self):
         dockerfile = (PROJECT_ROOT / "backend" / "Dockerfile").read_text(
             encoding="utf-8"
@@ -89,8 +107,8 @@ class DeploymentConfigTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         dev_script = (PROJECT_ROOT / "dev.ps1").read_text(encoding="utf-8")
 
-        self.assertIn(migration_name, migrate_all)
-        self.assertIn(migration_name, dev_script)
+        self.assertIn(migration_name, MIGRATION_SCRIPTS)
+        self.assertIn('scripts\\migrate_all.py', dev_script)
 
     def test_questionnaire_version_migration_runs_locally_and_in_production(self):
         migration_name = "migrate_phase11.py"
@@ -98,8 +116,8 @@ class DeploymentConfigTests(unittest.TestCase):
             PROJECT_ROOT / "backend" / "scripts" / "migrate_all.py"
         ).read_text(encoding="utf-8")
         dev_script = (PROJECT_ROOT / "dev.ps1").read_text(encoding="utf-8")
-        self.assertIn(migration_name, migrate_all)
-        self.assertIn(migration_name, dev_script)
+        self.assertIn(migration_name, MIGRATION_SCRIPTS)
+        self.assertIn('scripts\\migrate_all.py', dev_script)
         migration = (
             PROJECT_ROOT / "backend" / "scripts" / migration_name
         ).read_text(encoding="utf-8")
@@ -113,8 +131,8 @@ class DeploymentConfigTests(unittest.TestCase):
             PROJECT_ROOT / "backend" / "scripts" / "migrate_all.py"
         ).read_text(encoding="utf-8")
         dev_script = (PROJECT_ROOT / "dev.ps1").read_text(encoding="utf-8")
-        self.assertIn(migration_name, migrate_all)
-        self.assertIn(migration_name, dev_script)
+        self.assertIn(migration_name, MIGRATION_SCRIPTS)
+        self.assertIn('scripts\\migrate_all.py', dev_script)
         migration = (
             PROJECT_ROOT / "backend" / "scripts" / migration_name
         ).read_text(encoding="utf-8")
@@ -133,8 +151,8 @@ class DeploymentConfigTests(unittest.TestCase):
             PROJECT_ROOT / "backend" / "scripts" / migration_name
         ).read_text(encoding="utf-8")
 
-        self.assertIn(migration_name, migrate_all)
-        self.assertIn(migration_name, dev_script)
+        self.assertIn(migration_name, MIGRATION_SCRIPTS)
+        self.assertIn('scripts\\migrate_all.py', dev_script)
         self.assertIn("expert_annotations", migration)
         self.assertIn("raw_text", migration)
         self.assertIn("clean_text", migration)
@@ -146,8 +164,8 @@ class DeploymentConfigTests(unittest.TestCase):
             PROJECT_ROOT / "backend" / "scripts" / "migrate_all.py"
         ).read_text(encoding="utf-8")
         dev_script = (PROJECT_ROOT / "dev.ps1").read_text(encoding="utf-8")
-        self.assertIn(migration_name, migrate_all)
-        self.assertIn(migration_name, dev_script)
+        self.assertIn(migration_name, MIGRATION_SCRIPTS)
+        self.assertIn('scripts\\migrate_all.py', dev_script)
         migration = (
             PROJECT_ROOT / "backend" / "scripts" / migration_name
         ).read_text(encoding="utf-8")
@@ -164,8 +182,8 @@ class DeploymentConfigTests(unittest.TestCase):
             PROJECT_ROOT / "backend" / "scripts" / migration_name
         ).read_text(encoding="utf-8")
 
-        self.assertIn(migration_name, migrate_all)
-        self.assertIn(migration_name, dev_script)
+        self.assertIn(migration_name, MIGRATION_SCRIPTS)
+        self.assertIn('scripts\\migrate_all.py', dev_script)
         self.assertIn("classification_status", migration)
         self.assertIn("prediction_source", migration)
         self.assertIn("model_version", migration)
@@ -177,8 +195,8 @@ class DeploymentConfigTests(unittest.TestCase):
             PROJECT_ROOT / "backend" / "scripts" / "migrate_all.py"
         ).read_text(encoding="utf-8")
         dev_script = (PROJECT_ROOT / "dev.ps1").read_text(encoding="utf-8")
-        self.assertIn(migration_name, migrate_all)
-        self.assertIn(migration_name, dev_script)
+        self.assertIn(migration_name, MIGRATION_SCRIPTS)
+        self.assertIn('scripts\\migrate_all.py', dev_script)
         migration = (
             PROJECT_ROOT / "backend" / "scripts" / migration_name
         ).read_text(encoding="utf-8")
@@ -201,8 +219,8 @@ class DeploymentConfigTests(unittest.TestCase):
         migration = (
             PROJECT_ROOT / "backend" / "scripts" / migration_name
         ).read_text(encoding="utf-8")
-        self.assertIn(migration_name, migrate_all)
-        self.assertIn(migration_name, dev_script)
+        self.assertIn(migration_name, MIGRATION_SCRIPTS)
+        self.assertIn('scripts\\migrate_all.py', dev_script)
         self.assertIn("哪台投球机表现最优", migration)
         self.assertIn("设计并说明一种合理的数学程序", migration)
         self.assertIn("脑海中实时产生的所有想法", migration)
@@ -229,8 +247,8 @@ class DeploymentConfigTests(unittest.TestCase):
             PROJECT_ROOT / "backend" / "app" / "api" / "research.py"
         ).read_text(encoding="utf-8")
 
-        self.assertIn(migration_name, migrate_all)
-        self.assertIn(migration_name, dev_script)
+        self.assertIn(migration_name, MIGRATION_SCRIPTS)
+        self.assertIn('scripts\\migrate_all.py', dev_script)
         self.assertIn("questionnaire_participant_name", migration)
         self.assertIn("AFTER questionnaire_source", migration)
         self.assertIn(
@@ -248,8 +266,8 @@ class DeploymentConfigTests(unittest.TestCase):
         migration = (
             PROJECT_ROOT / "backend" / "scripts" / migration_name
         ).read_text(encoding="utf-8")
-        self.assertIn(migration_name, migrate_all)
-        self.assertIn(migration_name, dev_script)
+        self.assertIn(migration_name, MIGRATION_SCRIPTS)
+        self.assertIn('scripts\\migrate_all.py', dev_script)
         self.assertIn("extraction-worker:", compose)
         self.assertIn('scripts/extraction_worker.py', compose)
         self.assertIn("COLLATE=utf8mb4_unicode_ci", migration)
@@ -263,8 +281,8 @@ class DeploymentConfigTests(unittest.TestCase):
         migration = (
             PROJECT_ROOT / "backend" / "scripts" / migration_name
         ).read_text(encoding="utf-8")
-        self.assertIn(migration_name, migrate_all)
-        self.assertIn(migration_name, dev_script)
+        self.assertIn(migration_name, MIGRATION_SCRIPTS)
+        self.assertIn('scripts\\migrate_all.py', dev_script)
         self.assertIn("review_lock_expires_at", migration)
         self.assertIn("fk_extraction_job_review_lock_user", migration)
 
@@ -277,8 +295,8 @@ class DeploymentConfigTests(unittest.TestCase):
         migration = (
             PROJECT_ROOT / "backend" / "scripts" / migration_name
         ).read_text(encoding="utf-8")
-        self.assertIn(migration_name, migrate_all)
-        self.assertIn(migration_name, dev_script)
+        self.assertIn(migration_name, MIGRATION_SCRIPTS)
+        self.assertIn('scripts\\migrate_all.py', dev_script)
         self.assertIn("generation_no", migration)
         self.assertIn("extraction_candidate_revisions", migration)
         self.assertIn("ON DELETE CASCADE", migration)
@@ -292,8 +310,8 @@ class DeploymentConfigTests(unittest.TestCase):
         migration = (
             PROJECT_ROOT / "backend" / "scripts" / migration_name
         ).read_text(encoding="utf-8")
-        self.assertIn(migration_name, migrate_all)
-        self.assertIn(migration_name, dev_script)
+        self.assertIn(migration_name, MIGRATION_SCRIPTS)
+        self.assertIn('scripts\\migrate_all.py', dev_script)
         self.assertIn("ix_transcript_authoritative_latest", migration)
         self.assertIn("ix_candidate_job_status", migration)
 
@@ -306,8 +324,8 @@ class DeploymentConfigTests(unittest.TestCase):
         migration = (
             PROJECT_ROOT / "backend" / "scripts" / migration_name
         ).read_text(encoding="utf-8")
-        self.assertIn(migration_name, migrate_all)
-        self.assertIn(migration_name, dev_script)
+        self.assertIn(migration_name, MIGRATION_SCRIPTS)
+        self.assertIn('scripts\\migrate_all.py', dev_script)
         self.assertIn("现在可以生成个人报告", migration)
         self.assertIn("报告复核处理中", migration)
 
@@ -321,8 +339,8 @@ class DeploymentConfigTests(unittest.TestCase):
         migration = (
             PROJECT_ROOT / "backend" / "scripts" / migration_name
         ).read_text(encoding="utf-8")
-        self.assertIn(migration_name, migrate_all)
-        self.assertIn(migration_name, dev_script)
+        self.assertIn(migration_name, MIGRATION_SCRIPTS)
+        self.assertIn('scripts\\migrate_all.py', dev_script)
         self.assertIn("export-worker:", compose)
         self.assertIn('scripts/export_worker.py', compose)
         self.assertIn("audio_sha256", migration)
@@ -333,8 +351,8 @@ class DeploymentConfigTests(unittest.TestCase):
         migrate_all = (PROJECT_ROOT / "backend" / "scripts" / "migrate_all.py").read_text(encoding="utf-8")
         dev_script = (PROJECT_ROOT / "dev.ps1").read_text(encoding="utf-8")
         migration = (PROJECT_ROOT / "backend" / "scripts" / migration_name).read_text(encoding="utf-8")
-        self.assertIn(migration_name, migrate_all)
-        self.assertIn(migration_name, dev_script)
+        self.assertIn(migration_name, MIGRATION_SCRIPTS)
+        self.assertIn('scripts\\migrate_all.py', dev_script)
         self.assertIn("artifact_sha256", migration)
         self.assertIn("prediction_probabilities", migration)
 
@@ -343,8 +361,8 @@ class DeploymentConfigTests(unittest.TestCase):
         migrate_all = (PROJECT_ROOT / "backend" / "scripts" / "migrate_all.py").read_text(encoding="utf-8")
         dev_script = (PROJECT_ROOT / "dev.ps1").read_text(encoding="utf-8")
         migration = (PROJECT_ROOT / "backend" / "scripts" / migration_name).read_text(encoding="utf-8")
-        self.assertIn(migration_name, migrate_all)
-        self.assertIn(migration_name, dev_script)
+        self.assertIn(migration_name, MIGRATION_SCRIPTS)
+        self.assertIn('scripts\\migrate_all.py', dev_script)
         self.assertIn("current_fold", migration)
         self.assertIn("total_folds", migration)
         self.assertIn("heartbeat_at", migration)

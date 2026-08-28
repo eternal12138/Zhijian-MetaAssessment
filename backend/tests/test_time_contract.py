@@ -5,6 +5,7 @@ import unittest
 from app.core.time import as_utc, utc_isoformat, utc_now_naive
 from app.schemas.notification import NotificationOut
 from app.schemas.asr import AsrJobOut
+from scripts.migrate_all import SCRIPTS as MIGRATION_SCRIPTS
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -76,8 +77,8 @@ class TimeContractTests(unittest.TestCase):
             PROJECT_ROOT / "backend" / "scripts" / migration_name
         ).read_text(encoding="utf-8")
 
-        self.assertIn(migration_name, migrate_all)
-        self.assertIn(migration_name, dev_script)
+        self.assertIn(migration_name, MIGRATION_SCRIPTS)
+        self.assertIn('scripts\\migrate_all.py', dev_script)
         self.assertIn("phase19_timestamp_backup", migration)
         self.assertIn("schema_migrations", migration)
         self.assertIn("UTC_TIMESTAMP()", migration)

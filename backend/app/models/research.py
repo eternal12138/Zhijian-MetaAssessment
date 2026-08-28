@@ -367,6 +367,7 @@ class ModelTrainingJob(Base):
     """Immutable training version built from human-reviewed research data."""
 
     __tablename__ = "model_training_jobs"
+    __table_args__ = (Index("uq_training_active_scope", "active_scope", unique=True),)
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     version: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)
@@ -394,7 +395,9 @@ class ModelTrainingJob(Base):
     activated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     active_scope: Mapped[int | None] = mapped_column(
         Integer,
-        Computed("(if(`is_active`, 1, NULL))", persisted=True),
+        # SQL-standard CASE works on MySQL and SQLite, including older CI SQLite.
+        # NULL allows multiple inactive versions; unique 1 permits only one active.
+        Computed("CASE WHEN is_active THEN 1 ELSE NULL END", persisted=True),
         nullable=True,
     )
     error_message: Mapped[str] = mapped_column(Text, nullable=False, default="")

@@ -8,6 +8,14 @@ from scripts import migrate_all
 
 
 class DevMigrationRegistryTests(unittest.TestCase):
+    def test_production_calls_the_same_registry_before_bootstrap(self):
+        from scripts import setup_production
+        with patch.object(setup_production, 'run') as run:
+            setup_production.main()
+        self.assertEqual([call.args[0].name for call in run.call_args_list], [
+            'create_schema.py', 'migrate_all.py', 'bootstrap_admin.py', 'seed_protocol.py',
+        ])
+
     def test_dev_uses_registry_and_stops_before_bootstrap_on_failure(self):
         source = (Path(__file__).resolve().parents[2] / "dev.ps1").read_text(encoding="utf-8-sig")
         block = source.split('Write-Step "Apply idempotent project database migrations"', 1)[1]

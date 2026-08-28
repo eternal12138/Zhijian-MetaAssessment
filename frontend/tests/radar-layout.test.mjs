@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import ts from 'typescript'
 import * as vue from 'vue'
-import { parse, compileStyle, compileTemplate } from '@vue/compiler-sfc'
+import { parse, compileStyle, compileTemplate } from 'vue/compiler-sfc'
 
 const helper=ts.transpileModule(fs.readFileSync(new URL('../src/components/charts/radarLayout.ts',import.meta.url),'utf8'),{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ES2022}}).outputText
 const {radarLayout,radarAxisLabel,escapeChartText}=await import('data:text/javascript;base64,'+Buffer.from(helper).toString('base64'))
