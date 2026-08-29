@@ -206,6 +206,7 @@ Every push to `main` and every pull request triggers [GitHub Actions](https://gi
 
 ## 📚 Additional Documentation
 
+- [User's Manual](docs/用户手册.md) (Chinese)
 - [Alibaba Cloud Linux deployment](DEPLOY_ALIYUN.md) (Chinese)
 - [Volcengine ASR configuration](VOLCENGINE_ASR.md) (Chinese)
 - [Real-device mobile acceptance](MOBILE_DEVICE_ACCEPTANCE.md) (Chinese)
