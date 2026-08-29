@@ -206,6 +206,7 @@ python -m unittest discover -s research/tests -p "test_*.py" -v
 
 ## 📚 专项文档
 
+- [用户手册](docs/用户手册.md)
 - [阿里云 Linux 生产部署](DEPLOY_ALIYUN.md)
 - [火山引擎 ASR 配置](VOLCENGINE_ASR.md)
 - [移动端真实设备验收](MOBILE_DEVICE_ACCEPTANCE.md)
