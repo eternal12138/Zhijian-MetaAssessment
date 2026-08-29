@@ -104,7 +104,7 @@ test('review entry is role-gated, list has no direct publish, and draft print is
   assert.match(list,/查看草稿/);assert.doesNotMatch(list,/@click="publish\(/);assert.doesNotMatch(list,/@click="bulkPublish"/)
   assert.match(source,/草稿·未发布/);assert.match(source,/review-controls \{ display:none !important/)
   assert.doesNotMatch(source,/与历史记录对比/)
-  assert.match(source,/本轮元认知模式（仅供参考并非稳定能力或人格类型的体现）/)
+  assert.match(source,/<h6>本轮元认知模式<\/h6>/)
   assert.match(source,/群体常模.*待接入/)
   assert.match(source,/v-if="isReviewer" class="row g-4 mt-1 dimension-grid"/)
   assert.match(source,/v-if="isReviewer" class="card border-0 shadow-sm mt-4"/)
