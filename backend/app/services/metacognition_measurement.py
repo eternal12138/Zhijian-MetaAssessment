@@ -127,6 +127,9 @@ async def calculate_and_persist_measurement(
     measurement.denominator_breakdown = profile["denominator_breakdown"]
     measurement.fallback_dialogue_count = profile["fallback_dialogue_count"]
     measurement.unclassified_count = profile["unclassified_count"]
+    measurement.evidence_status_counts = profile["evidence_status_counts"]
+    measurement.retained_previous_count = profile["retained_previous_count"]
+    measurement.session_states = profile["session_states"]
     measurement.source = source
     measurement.data_version = data_version
     measurement.calculated_at = utc_now_naive()

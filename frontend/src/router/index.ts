@@ -57,6 +57,12 @@ const router = createRouter({
       meta: { title: '我的报告', icon: 'bi-bar-chart-fill', description: '查看监控、控制/调试与评估三个维度的成长轨迹。', requiresAuth: true, allowedRoles: ['student'] }
     },
     {
+      path: '/report-review',
+      name: 'ReportReview',
+      component: () => import('../views/ReportView.vue'),
+      meta: { title: '报告草稿审阅', description: '查看报告正文与发布检查，审阅确认后发布给学生。', requiresAuth: true, allowedRoles: ['teacher', 'admin'] }
+    },
+    {
       path: '/notifications',
       name: 'NotificationCenter',
       component: () => import('../views/NotificationCenterView.vue'),

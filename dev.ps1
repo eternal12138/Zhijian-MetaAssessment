@@ -64,6 +64,7 @@ $logDir = Join-Path $runtimeDir "logs"
 $backendPidFile = Join-Path $runtimeDir "backend.pid"
 $frontendPidFile = Join-Path $runtimeDir "frontend.pid"
 $asrWorkerPidFile = Join-Path $runtimeDir "asr-worker.pid"
+$reportWorkerPidFile = Join-Path $runtimeDir "report-worker.pid"
 $extractionWorkerPidFile = Join-Path $runtimeDir "extraction-worker.pid"
 $exportWorkerPidFile = Join-Path $runtimeDir "export-worker.pid"
 $modelTrainingWorkerPidFile = Join-Path $runtimeDir "model-training-worker.pid"
@@ -301,6 +302,7 @@ if ($Restart) {
     Stop-RecordedProcess -PidFile $backendPidFile
     Stop-RecordedProcess -PidFile $frontendPidFile
     Stop-RecordedProcess -PidFile $asrWorkerPidFile
+    Stop-RecordedProcess -PidFile $reportWorkerPidFile
     Stop-RecordedProcess -PidFile $extractionWorkerPidFile
     Stop-RecordedProcess -PidFile $exportWorkerPidFile
     Stop-RecordedProcess -PidFile $modelTrainingWorkerPidFile
@@ -671,6 +673,17 @@ if ($extractionEnabled.ToLowerInvariant() -ne "false") {
         throw "Candidate extraction worker startup failed. See $extractionWorkerErrorLog"
     }
 }
+
+Write-Step "Start the AI report worker"
+$reportWorkerPidFile = Join-Path $runtimeDir "report-worker.pid"
+$reportWorkerLog = Join-Path $logDir "report-worker.log"
+$reportWorkerErrorLog = Join-Path $logDir "report-worker.error.log"
+Stop-RecordedProcess -PidFile $reportWorkerPidFile
+$reportWorkerProcess = Start-Process -FilePath $venvPython `
+    -ArgumentList @("scripts\report_worker.py") `
+    -WorkingDirectory $backendDir -WindowStyle Hidden `
+    -RedirectStandardOutput $reportWorkerLog -RedirectStandardError $reportWorkerErrorLog -PassThru
+Set-Content -LiteralPath $reportWorkerPidFile -Value $reportWorkerProcess.Id -Encoding ASCII
 
 Write-Step "Start the research export worker"
 Stop-RecordedProcess -PidFile $exportWorkerPidFile

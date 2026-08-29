@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import get_current_user
 from app.database import get_db
-from app.models.extraction import ExtractionCandidate, ExtractionJob
+from app.models.extraction import ExtractionCandidate
 from app.models.research import AuditLog, ModelTrainingJob
 from app.models.session import AssessmentSession
 from app.models.task import AssessmentTask
@@ -20,6 +20,11 @@ from app.schemas.ai_evaluation import (
     AiEvaluationRunOut, AiEvaluationScopeOut,
 )
 from app.services.model_inference import classify_candidates
+from app.services.evidence_selection import (
+    latest_current_extractions, valid_candidate_classification,
+    normalized_candidate_dimension, DIMENSION_ALIASES, CLASSIFIED_STATUSES,
+)
+from app.services.metacognition_distribution import normalize_dimension
 from app.services.model_metrics_service import group_evaluations
 from app.services.model_training_datasets import load_dataset_samples
 from app.config import get_settings
@@ -55,15 +60,7 @@ def _managed_classes(user: User) -> set[str]:
 
 
 def _latest_jobs_subquery():
-    ranked = select(
-        ExtractionJob.id.label("job_id"),
-        ExtractionJob.session_id.label("session_id"),
-        func.row_number().over(
-            partition_by=ExtractionJob.session_id,
-            order_by=(ExtractionJob.created_at.desc(), ExtractionJob.id.desc()),
-        ).label("rank_no"),
-    ).where(ExtractionJob.status.in_(("completed", "reviewing", "reviewed"))).subquery()
-    return select(ranked.c.job_id, ranked.c.session_id).where(ranked.c.rank_no == 1).subquery()
+    return latest_current_extractions()
 
 
 def _visible_condition(user: User):
@@ -162,7 +159,7 @@ async def overview(
     latest_jobs = _latest_jobs_subquery()
     classified_condition = and_(
         ExtractionCandidate.classifier_job_id == (active.id if active else ""),
-        ExtractionCandidate.review_status.in_(ELIGIBLE_REVIEW_STATUSES),
+        valid_candidate_classification(),
     )
     classified = case((classified_condition, 1), else_=0)
     statement = (
@@ -174,9 +171,10 @@ async def overview(
             func.sum(case((ExtractionCandidate.review_status == "pending", 1), else_=0)),
             func.sum(case((ExtractionCandidate.review_status == "rejected", 1), else_=0)),
             func.sum(classified),
-            func.sum(case((and_(classified_condition, ExtractionCandidate.predicted_dimension == "monitoring"), 1), else_=0)),
-            func.sum(case((and_(classified_condition, ExtractionCandidate.predicted_dimension == "controlDebugging"), 1), else_=0)),
-            func.sum(case((and_(classified_condition, ExtractionCandidate.predicted_dimension == "evaluation"), 1), else_=0)),
+            func.sum(case((and_(classified_condition, normalized_candidate_dimension().in_(DIMENSION_ALIASES["monitoring"])), 1), else_=0)),
+            func.sum(case((and_(classified_condition, normalized_candidate_dimension().in_(DIMENSION_ALIASES["controlDebugging"])), 1), else_=0)),
+            func.sum(case((and_(classified_condition, normalized_candidate_dimension().in_(DIMENSION_ALIASES["evaluation"])), 1), else_=0)),
+            func.sum(case((valid_candidate_classification(), 1), else_=0)),
         )
         .join(latest_jobs, latest_jobs.c.session_id == AssessmentSession.id)
         .join(ExtractionCandidate, ExtractionCandidate.extraction_job_id == latest_jobs.c.job_id)
@@ -198,6 +196,7 @@ async def overview(
         candidate_count=int(row[8] or 0), reviewed_count=int(row[9] or 0),
         pending_count=int(row[10] or 0), rejected_count=int(row[11] or 0),
         classified_count=int(row[12] or 0), training_participant=row[1] in training_participants,
+        available_classified_count=int(row[16] or 0),
         dimension_counts={"monitoring": int(row[13] or 0), "regulation": int(row[14] or 0), "evaluation": int(row[15] or 0)},
     ) for row in rows]
     return AiEvaluationOverviewOut(
@@ -233,6 +232,8 @@ async def classify_scope(
                 ExtractionCandidate.classifier_job_id.is_(None),
                 ExtractionCandidate.classifier_job_id != active.id,
                 ExtractionCandidate.classification_status.not_in(("classified", "classified_with_fallback")),
+                ExtractionCandidate.predicted_dimension.is_(None),
+                ~normalized_candidate_dimension().in_(tuple(v for values in DIMENSION_ALIASES.values() for v in values)),
             ),
         )
         .order_by(ExtractionCandidate.session_id, ExtractionCandidate.sequence_no)
@@ -253,6 +254,11 @@ async def classify_scope(
     if batch:
         try:
             await classify_candidates(db, batch)
+            # Do not report success or loop indefinitely when a legacy model
+            # returns label 0/invalid labels, or a provider leaves items pending.
+            if any(item.classification_status not in CLASSIFIED_STATUSES or
+                   normalize_dimension(item.predicted_dimension) is None for item in batch):
+                raise ValueError("模型未返回完整有效的监控/调控/评估三分类结果，请核查当前启用模型及分类服务；本批次未保存")
             # Force cache and prediction audit writes here so database failures
             # are reported as a classification error instead of a generic 500
             # from a later query-triggered autoflush.

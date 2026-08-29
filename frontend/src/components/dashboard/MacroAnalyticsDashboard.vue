@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, onScopeDispose, ref, watch } from 'vue'
 import { confirmAction, notify } from '../../composables/useUiFeedback'
 import RadarChart from '../charts/RadarChart.vue'
 import AppErrorBoundary from '../feedback/AppErrorBoundary.vue'
@@ -32,6 +32,11 @@ const uploadingCorrection = ref(false)
 const correctionFile = ref<File | null>(null)
 let requestId = 0
 let taskRequestId = 0
+let runRequestId = 0
+let resettingRun = false
+const runRefreshing = ref(false)
+const runErrorMessage = ref('')
+onScopeDispose(() => { requestId++; taskRequestId++; runRequestId++ })
 
 const isStudent = computed(() => props.userRole === 'student')
 const selectedRunMeasurement = computed(() => (
@@ -167,6 +172,26 @@ function denominatorDescription(breakdown: Record<string, number> = {}) {
     .map(([source, count]) => `${names[source] ?? source} ${count} 条`).join('；') || '暂无有效分母'
 }
 
+const evidenceStatusLabels: Record<string, string> = {
+  ready: '已有可用结果', classification_partial: '部分候选待分类',
+  no_transcript: '暂无权威转录', awaiting_extraction: '当前转录尚未抽取',
+  extraction_queued: '抽取排队中', extraction_running: '抽取中', extraction_processing: '抽取中',
+  extraction_retry_wait: '抽取等待重试', extraction_retrying: '抽取等待重试', extraction_failed: '抽取失败',
+  classification_pending: '当前版本待分类', classification_failed: '分类失败，等待处理',
+  no_candidates: '抽取已完成，无候选', all_rejected: '候选均已排除', no_three_class_labels: '暂无有效三类标签'
+}
+function evidenceStatusLabel(status: string) { return evidenceStatusLabels[status] ?? '当前结果待处理' }
+function evidenceStatusSummary(counts: Record<string, number> = {}) {
+  return Object.entries(counts).map(([status, count]) => `${evidenceStatusLabel(status)}：${count} 个任务会话`).join('；')
+}
+function sessionEvidenceDescription(item: NonNullable<MetacognitionMeasurement['session_states']>[number]) {
+  const name = taskOptions.value.find(task => task.id === item.task_id)?.name ?? '任务'
+  const version = item.extraction_generation == null ? '' : ` · 抽取 V${item.extraction_generation}`
+  const model = item.model_versions.length ? ` · 分类模型 ${item.model_versions.join('、')}` : ''
+  const pending = item.using_previous_extraction ? `；新抽取 V${item.latest_generation} ${evidenceStatusLabel(`extraction_${item.latest_extraction_status}`)}，暂显示同一转录的上一成功版本` : ''
+  return `${name}${version}：${evidenceStatusLabel(item.status)}${model}${pending}`
+}
+
 const comparisonProfiles = computed(() => [analytics.value?.radar_profiles.class_group, analytics.value?.radar_profiles.overall]
   .filter((item): item is MacroRadarProfile => Boolean(item && item.label !== primaryRadar.value?.label)))
 
@@ -208,13 +233,17 @@ async function uploadCorrection() {
 function formatMeasurementOption(measurement: MetacognitionMeasurement) {
   const date = new Date(measurement.completed_at).toLocaleString('zh-CN', { hour12: false })
   const tasks = measurement.task_names.join(' / ') || '问题解决任务'
-  const status = !measurement.score_available ? '待分类'
+  const states = Object.keys(measurement.evidence_status_counts ?? {})
+  const status = !measurement.score_available ? (states.length === 1 ? evidenceStatusLabel(states[0]!) : '待分类')
     : measurement.fallback_dialogue_count || measurement.unclassified_count ? '暂定结果' : '已有画像'
   return `${date} · ${status} · ${tasks}`
 }
 
 async function fetchRealMacroData() {
   const currentRequest = ++requestId
+  ++runRequestId
+  runRefreshing.value = false
+  runErrorMessage.value = ''
   isLoading.value = true
   errorMessage.value = ''
   try {
@@ -249,6 +278,24 @@ async function fetchRealMacroData() {
   }
 }
 
+async function fetchSelectedRunMeasurement() {
+  const currentRequest = ++runRequestId
+  const runId = selectedMeasurementRunId.value
+  runErrorMessage.value = ''
+  if (!isStudent.value || !runId) return
+  runRefreshing.value = true
+  try {
+    const response = await reportApi.getMetacognitionMeasurement(runId)
+    if (currentRequest !== runRequestId || selectedMeasurementRunId.value !== runId) return
+    if (response.data.run_id !== runId) throw new Error('返回结果与所选轮次不一致，请重试')
+    measurementHistory.value = measurementHistory.value.map(item => item.run_id === runId ? response.data : item)
+  } catch (error) {
+    if (currentRequest === runRequestId) runErrorMessage.value = error instanceof Error ? error.message : '整轮结果刷新失败'
+  } finally {
+    if (currentRequest === runRequestId) runRefreshing.value = false
+  }
+}
+
 async function fetchSelectedTaskMeasurement() {
   const currentRequest = ++taskRequestId
   taskMeasurement.value = null
@@ -277,14 +324,21 @@ watch(selectedClass, () => {
 })
 watch(selectedParticipant, () => void fetchRealMacroData())
 watch(selectedMeasurementRunId, () => {
+  resettingRun = true
   selectedTaskId.value = 'all'
+  resettingRun = false
   taskMeasurement.value = null
   ++taskRequestId
   taskMeasurementLoading.value = false
   taskErrorMessage.value = ''
+  if (!isLoading.value) void fetchSelectedRunMeasurement()
 }, { flush: 'sync' })
-watch(selectedTaskId, () => void fetchSelectedTaskMeasurement(), { flush: 'sync' })
-watch(() => props.classGroups, classes => {
+watch(selectedTaskId, () => {
+  void fetchSelectedTaskMeasurement()
+  if (selectedTaskId.value === 'all' && !isLoading.value && !resettingRun) void fetchSelectedRunMeasurement()
+}, { flush: 'sync' })
+// Task-order students are paginated; a page change must not reset this filter.
+watch(classOptions, classes => {
   if (selectedClass.value !== 'all' && !classes.includes(selectedClass.value)) selectedClass.value = 'all'
 }, { deep: true })
 onMounted(() => void fetchRealMacroData())
@@ -349,12 +403,15 @@ onMounted(() => void fetchRealMacroData())
         <div v-else-if="(isLoading || taskMeasurementLoading) && !(isStudent ? selectedMeasurement : analytics)" class="macro-loading" aria-label="正在读取三维测量数据"><span v-for="index in 4" :key="index" class="skeleton-block" /></div>
 
         <div v-else-if="isStudent" class="macro-view-pane">
+          <p v-if="runRefreshing && selectedTaskId === 'all'" class="text-muted small" role="status">正在核对本轮最新结果，以下为已加载的数据…</p>
+          <div v-if="runErrorMessage && selectedTaskId === 'all'" class="alert alert-warning" role="alert">{{ runErrorMessage }}。以下仍为上次读取的数据。<button class="btn btn-sm btn-outline-secondary ms-2" @click="fetchSelectedRunMeasurement">重试刷新</button></div>
+          <div v-if="selectedMeasurement?.session_states?.length" class="composition-note mb-3" role="status"><i class="bi bi-info-circle-fill" /><div><p v-for="item in selectedMeasurement.session_states" :key="item.session_id" class="mb-1">{{ sessionEvidenceDescription(item) }}</p></div></div>
           <div v-if="taskErrorMessage" class="alert alert-danger mb-0" role="alert">
             <p class="mb-2">当前任务结果加载失败：{{ taskErrorMessage }}。可重试，或切回整轮汇总查看已加载的结果。</p>
             <button class="btn btn-sm btn-outline-danger" @click="fetchSelectedTaskMeasurement">重试当前任务</button>
           </div>
           <div v-else-if="!selectedMeasurement" class="macro-empty"><i class="bi bi-radar" /><strong>暂无已完成轮次</strong><p>完成一轮问题解决测评后，该轮次会显示在这里；分类结果生成后再展示三维画像。</p></div>
-          <div v-else-if="!selectedMeasurement.score_available" class="macro-empty"><i class="bi bi-radar" /><strong>{{ selectedTaskId === 'all' ? '本轮' : '当前任务' }}暂无可用分类结果</strong><p>复核/管理员校对数据优先；均无可用结果时使用三类标签总数作为分母，并明确标记回退。没有分类结果时不生成虚假的零分画像。</p></div>
+          <div v-else-if="!selectedMeasurement.score_available" class="macro-empty"><i class="bi bi-radar" /><strong>{{ selectedTaskId === 'all' ? '本轮' : '当前任务' }}暂无可用分类结果</strong><p>{{ evidenceStatusSummary(selectedMeasurement.evidence_status_counts) || '当前版本尚无可用分类，请联系教师核查。' }}。新转录或新抽取版本不沿用旧文本标签；没有分类结果时不生成虚假的零分画像。</p></div>
           <div v-else class="radar-detail-layout">
             <div class="radar-panel">
               <h6>三维占比</h6>
@@ -378,6 +435,7 @@ onMounted(() => void fetchRealMacroData())
         </div>
 
         <div v-else-if="analytics && activeViewTab === 'macro_radar'" class="macro-view-pane">
+          <div v-if="primaryRadar?.evidence_status_counts" class="composition-note mb-3" role="status"><i class="bi bi-info-circle-fill" /><span>{{ evidenceStatusSummary(primaryRadar.evidence_status_counts) }}。<template v-if="primaryRadar.retained_previous_count">其中 {{ primaryRadar.retained_previous_count }} 个会话的新抽取尚未成功，暂使用同一转录的上一成功版本。</template></span></div>
           <div v-if="!hasRadarData" class="macro-empty"><i class="bi bi-radar" /><strong>当前范围暂无三分类证据</strong><p>完成候选复核并形成专家编码，或使用已启用模型完成三分类后，系统才会按真实记录计算占比。</p></div>
           <div v-else class="radar-detail-layout">
             <div class="radar-panel">

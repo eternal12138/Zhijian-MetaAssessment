@@ -202,6 +202,30 @@ services:
       - internal
     logging: *logging
 
+  report-worker:
+    build:
+      context: ./backend
+    restart: unless-stopped
+    mem_limit: 384m
+    cpu_shares: 256
+    env_file:
+      - .env.production
+    environment:
+      DB_HOST: db
+      DB_PORT: 3306
+      DB_POOL_SIZE: 2
+      DB_MAX_OVERFLOW: 1
+      AUDIO_UPLOAD_DIR: /data/audio
+      RESEARCH_EXPORT_DIR: /data/exports
+      MODEL_TRAINING_DIR: /data/models
+    command: ["python", "scripts/report_worker.py"]
+    depends_on:
+      db-permissions:
+        condition: service_completed_successfully
+    networks:
+      - internal
+    logging: *logging
+
   model-training-worker:
     build:
       context: ./backend

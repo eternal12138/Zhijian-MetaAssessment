@@ -41,6 +41,8 @@ SCRIPTS = (
     "migrate_phase32.py",
     "migrate_phase33.py",
     "migrate_phase34.py",
+    "migrate_phase35.py",
+    "migrate_phase36.py",
 )
 
 

@@ -14,14 +14,14 @@ from urllib.parse import urlencode
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from fastapi.responses import FileResponse
 from starlette.background import BackgroundTask
-from sqlalchemy import func, or_, select, update
+from sqlalchemy import case, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from scipy import stats
 
 from app.config import get_settings
 from app.core.security import can_access_user, get_current_user, require_role
-from app.core.time import utc_isoformat, utc_now_naive
+from app.core.time import as_utc, utc_isoformat, utc_now_naive
 from app.database import AsyncSessionLocal, get_db
 from app.models.protocol import AssessmentRun
 from app.models.report import MetacognitiveProfile
@@ -53,7 +53,7 @@ from app.schemas.research import (
     TemplateAuditOut, TemplateOut, TemplateUpdateIn,
 )
 from app.services.method_templates import DEFAULT_TEMPLATES
-from app.services.report_analyzer import generate_run_report
+from app.services.report_analyzer import ReportReadOnlyError, generate_run_report
 from app.services.audio_manifest import build_audio_manifest
 from app.services.audio_processor import merge_and_transcode
 from app.services.research_export import (
@@ -118,6 +118,7 @@ def _analysis_job_out(
         run_id=job.run_id,
         status=job.status,
         progress=job.progress,
+        heartbeat_at=job.heartbeat_at,
         error_message=job.error_message or "",
         result_profile_id=job.result_profile_id,
         created_at=created_at or job.created_at,
@@ -299,6 +300,24 @@ async def decide_run_quality(
     return await _quality_out(run, owner, review, quality, db)
 
 
+async def _repair_duplicate_active_templates(
+    db: AsyncSession, items: list[MethodTemplate]
+) -> None:
+    """Keep the newest active version per key on pre-constraint databases."""
+    active_seen: set[str] = set()
+    repaired = False
+    for item in items:
+        if not item.is_active:
+            continue
+        if item.template_key in active_seen:
+            item.is_active = False
+            repaired = True
+        else:
+            active_seen.add(item.template_key)
+    if repaired:
+        await db.flush()
+
+
 @router.get("/templates", response_model=list[TemplateOut])
 async def list_templates(
     user: User = Depends(require_role("admin")),
@@ -332,6 +351,7 @@ async def list_templates(
             )
         )
         items = list(result.scalars().all())
+    await _repair_duplicate_active_templates(db, items)
     return items
 
 
@@ -381,6 +401,11 @@ async def replace_template(
             raise HTTPException(status_code=422, detail="报告提示词必须保留 {overall_score} 和 {dimension_results} 占位符")
     if template_key == "metacognitive_extractor" and "{segments}" not in data.content:
         raise HTTPException(status_code=422, detail="候选抽取提示词必须保留 {segments} 占位符")
+    locked_templates = list((await db.execute(
+        select(MethodTemplate)
+        .where(MethodTemplate.template_key == template_key)
+        .with_for_update()
+    )).scalars().all())
     duplicate = await db.scalar(
         select(func.count(MethodTemplate.id)).where(
             MethodTemplate.template_key == template_key,
@@ -389,10 +414,7 @@ async def replace_template(
     )
     if duplicate:
         raise HTTPException(status_code=409, detail="该模板版本号已经存在，请使用新版本号")
-    previous_active = await db.scalar(select(MethodTemplate).where(
-        MethodTemplate.template_key == template_key,
-        MethodTemplate.is_active.is_(True),
-    ))
+    previous_active = next((item for item in locked_templates if item.is_active), None)
     await db.execute(
         update(MethodTemplate)
         .where(MethodTemplate.template_key == template_key)
@@ -424,16 +446,15 @@ async def activate_template_version(
     user: User = Depends(require_role("admin")),
     db: AsyncSession = Depends(get_db),
 ):
-    template = await db.scalar(select(MethodTemplate).where(
-        MethodTemplate.id == template_id,
-        MethodTemplate.template_key == template_key,
-    ))
+    locked_templates = list((await db.execute(
+        select(MethodTemplate)
+        .where(MethodTemplate.template_key == template_key)
+        .with_for_update()
+    )).scalars().all())
+    template = next((item for item in locked_templates if item.id == template_id), None)
     if template is None:
         raise HTTPException(status_code=404, detail="提示词历史版本不存在")
-    previous_active = await db.scalar(select(MethodTemplate).where(
-        MethodTemplate.template_key == template_key,
-        MethodTemplate.is_active.is_(True),
-    ))
+    previous_active = next((item for item in locked_templates if item.is_active), None)
     await db.execute(
         update(MethodTemplate)
         .where(MethodTemplate.template_key == template_key)
@@ -454,7 +475,7 @@ async def activate_template_version(
     return template
 
 
-@router.post("/analysis/runs/{run_id}", response_model=AnalysisJobOut)
+@router.post("/analysis/runs/{run_id}", response_model=AnalysisJobOut, status_code=202)
 async def start_analysis(
     run_id: str,
     data: AnalysisStartIn,
@@ -472,39 +493,27 @@ async def start_analysis(
             status_code=409,
             detail=f"数据质量尚未通过，不能进入正式分析：{'、'.join(failed)}。可在数据质量工作台修复或人工判定纳入。",
         )
-    created_at = _now()
-    job = AnalysisJob(
-        run_id=run.id,
-        requested_by=user.id,
-        status="running",
-        progress=10,
-        started_at=_now(),
-        context_key=f"run:{run.id}:{datetime.now().timestamp()}",
-        created_at=created_at,
-    )
-    db.add(job)
-    await db.flush()
+    from app.services.report_jobs import enqueue_report
+    if data.reanalyze:
+        raise HTTPException(status_code=422, detail="报告生成不再重新编码原文，请使用候选复核与 AI 评估")
     try:
-        # A failed analyzer must not leave a partially generated report behind.
-        async with db.begin_nested():
-            profile = await generate_run_report(run.id, db, reanalyze=data.reanalyze)
-        job.result_profile_id = profile.id
-        job.status = "completed"
-        job.progress = 100
-        job.completed_at = _now()
-    except Exception as error:
-        job.status = "failed"
-        job.error_message = str(error)[:2000]
-        job.completed_at = _now()
-    finally:
-        # 模型上下文只在单次分析任务中存在；研究原始数据仍按知情同意保留。
-        job.context_key = None
+        job = await enqueue_report(run.id, user.id, db, report_only=data.report_only,
+                                   expected_generated_at=data.expected_generated_at)
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
     _audit(db, user, "analysis.run", "assessment_run", run.id, {
-        "job_id": job.id,
-        "status": job.status,
-        "reanalyze": data.reanalyze,
-    })
-    return _analysis_job_out(job, created_at=created_at)
+        "job_id": job.id, "status": job.status, "report_only": data.report_only})
+    return _analysis_job_out(job)
+
+
+@router.get("/analysis/jobs", response_model=list[AnalysisJobOut])
+async def list_analysis_jobs(user: User = Depends(require_role("teacher", "admin")), db: AsyncSession = Depends(get_db)):
+    statement = select(AnalysisJob, User).join(AssessmentRun, AssessmentRun.id == AnalysisJob.run_id).join(
+        User, User.id == AssessmentRun.user_id)
+    if user.role != "admin":
+        statement = statement.where(User.class_group.in_([c.strip() for c in (user.managed_classes or "").split(",") if c.strip()]))
+    rows = (await db.execute(statement.order_by(AnalysisJob.created_at.desc()).limit(30))).all()
+    return [_analysis_job_out(job) for job, owner in rows if can_access_user(user, owner)]
 
 
 @router.get("/analysis/jobs/{job_id}", response_model=AnalysisJobOut)
@@ -1268,8 +1277,9 @@ async def _finish_coding_batch_if_ready(
         )
         .distinct()
     )
-    for run_id in run_result.scalars().all():
-        await generate_run_report(run_id, db, reanalyze=False)
+    # Coding completion must not implicitly overwrite a draft or invoke paid AI.
+    # Publication detects stale evidence; users explicitly regenerate the report.
+    await db.flush()
 
 
 async def _recompute_expert_resolution(unit: CodingUnit, db: AsyncSession) -> None:
@@ -1562,23 +1572,117 @@ async def _coding_unit_pending_for_run(
     run_id: str,
     db: AsyncSession,
 ) -> int | None:
-    batch_result = await db.execute(
-        select(CodingBatch.id)
-        .join(CodingUnit, CodingUnit.batch_id == CodingBatch.id)
+    rows = (await db.execute(select(CodingUnit.session_id, CodingBatch.id, CodingUnit.status)
+        .join(CodingBatch, CodingBatch.id == CodingUnit.batch_id)
         .where(CodingUnit.run_id == run_id)
-        .order_by(CodingBatch.created_at.desc(), CodingBatch.id.desc())
-        .limit(1)
-    )
-    batch_id = batch_result.scalar_one_or_none()
-    if batch_id is None:
-        return None
-    return int(await db.scalar(
-        select(func.count(CodingUnit.id)).where(
-            CodingUnit.batch_id == batch_id,
-            CodingUnit.run_id == run_id,
-            ~CodingUnit.status.in_(("agreed", "adjudicated")),
-        )
-    ) or 0)
+        .order_by(CodingBatch.created_at.desc(), CodingBatch.id.desc()))).all()
+    latest = {}
+    pending = 0
+    for session_id, batch_id, state in rows:
+        if latest.setdefault(session_id, batch_id) == batch_id:
+            pending += int(state not in {"agreed", "adjudicated"})
+    session_ids = set((await db.scalars(select(AssessmentSession.id).where(
+        AssessmentSession.run_id == run_id))).all())
+    return pending if session_ids and session_ids.issubset(latest) else None
+
+
+async def _report_publication_checks(report: MetacognitiveProfile, db: AsyncSession) -> list[dict]:
+    """The review screen and write endpoint use exactly the same gates."""
+    if not report.run_id:
+        return [{"key": "run", "passed": False, "message": "旧报告未关联完整测评，不能发布正式报告", "route": "/teacher"}]
+    _run, _review, quality = await _quality_for_run(report.run_id, db)
+    pending = await _coding_unit_pending_for_run(report.run_id, db)
+    from app.services.report_evidence import build_report_snapshot
+    snapshot = report.evidence_snapshot
+    version_ok = False
+    version_message = "历史草稿缺少生成数据快照，请重新 AI 分析后审阅"
+    if snapshot:
+        try:
+            current = await build_report_snapshot(report.run_id, db)
+            version_ok = current["data_version"] == snapshot["data_version"]
+            version_message = "报告与当前数据版本一致" if version_ok else "数据已更新，当前草稿基于旧版数据，请重新生成并审阅"
+        except ValueError as error:
+            version_message = str(error)
+    active_job = await db.scalar(select(AnalysisJob.id).where(AnalysisJob.active_run_id == report.run_id))
+    return [
+        {"key": "generation", "passed": (report.generation_metadata or {}).get("status") == "ai_success",
+         "message": "AI 生成来源已验证" if (report.generation_metadata or {}).get("status") == "ai_success" else "未记录成功的 AI 生成来源，请重新生成", "route": "", "overridable": False},
+        {"key": "data_version", "passed": version_ok, "message": version_message, "route": "", "overridable": False},
+        {"key": "evidence", "passed": bool(snapshot) and not snapshot.get("is_provisional", True),
+         "message": "本轮数据已完整复核" if snapshot and not snapshot.get("is_provisional", True) else "结果含未复核、回退、未分类或缺失任务数据；可确认风险后发布", "route": "/review", "overridable": True},
+        {"key": "generation_idle", "passed": active_job is None,
+         "message": "无正在生成的报告任务" if active_job is None else "报告正在排队或生成，请等待完成后审阅新版本", "route": "", "overridable": False},
+        {"key": "quality", "passed": quality_allows_analysis(quality),
+         "message": "数据质量门槛已通过" if quality_allows_analysis(quality) else "该测评未通过数据质量门槛，不能发布正式报告", "route": "/teacher", "overridable": False},
+        {"key": "confidence", "passed": report.requires_review_count == 0,
+         "message": "报告无待分类对话" if report.requires_review_count == 0 else f"仍有 {report.requires_review_count} 条对话待分类；可确认风险后发布", "route": "/review", "overridable": True},
+        {"key": "coding", "passed": pending == 0,
+         "message": ("双人盲编已形成共识或完成仲裁" if pending == 0 else
+                      "尚未为该测评创建固定双盲编码批次；可确认风险后发布" if pending is None else
+                      f"仍有 {pending} 个盲编单元未形成共识或完成仲裁；可确认风险后发布"), "route": "/review", "overridable": True},
+        {"key": "status", "passed": report.workflow_status in {"draft", "review_pending", "reviewed"},
+         "message": "报告可进入发布审核" if report.workflow_status in {"draft", "review_pending", "reviewed"} else "该报告已发布或已归档，不能重复发布", "route": "", "overridable": False},
+    ]
+
+
+@router.get("/reports/{report_id}/review")
+async def review_report(
+    report_id: str,
+    user: User = Depends(require_role("teacher", "admin")),
+    db: AsyncSession = Depends(get_db),
+):
+    from app.api.reports import _load_profile, _report_out, _measurement_out
+    from app.services.metacognition_measurement import calculate_and_persist_measurement
+    report = await _load_profile(profile_id=report_id, db=db)
+    if report is None:
+        raise HTTPException(status_code=404, detail="报告不存在")
+    owner = await db.get(User, report.user_id)
+    if owner is None or not can_access_user(user, owner):
+        raise HTTPException(status_code=403, detail="无权审阅该报告")
+    checks = await _report_publication_checks(report, db)
+    from app.services.report_evidence import snapshot_measurement
+    measurement = snapshot_measurement(report.evidence_snapshot)
+    measurement_error = ""
+    if not measurement and report.run_id:
+        run = await db.get(AssessmentRun, report.run_id)
+        if run and run.status == "completed" and run.completed_at:
+            try:
+                measurement = await _measurement_out(await calculate_and_persist_measurement(run, db), db)
+            except ValueError as error:
+                measurement_error = str(error)
+    return {
+        "report": _report_out(report),
+        "owner": {"name": owner.name, "username": owner.username, "class_group": owner.class_group},
+        "checks": checks,
+        "can_publish": all(
+            item["passed"] or item.get("overridable") for item in checks
+        ),
+        "risks": [
+            item["message"] for item in checks
+            if not item["passed"] and item.get("overridable")
+        ],
+        "measurement": measurement,
+        "measurement_error": measurement_error,
+    }
+
+
+@router.get("/reports/{report_id}/versions")
+async def report_versions(
+    report_id: str, page: int = Query(1, ge=1),
+    user: User = Depends(require_role("teacher", "admin")), db: AsyncSession = Depends(get_db),
+):
+    from app.models.report import ReportRevision
+    profile = await db.get(MetacognitiveProfile, report_id)
+    if not profile:
+        raise HTTPException(status_code=404, detail="报告不存在")
+    owner = await db.get(User, profile.user_id)
+    if not owner or not can_access_user(user, owner):
+        raise HTTPException(status_code=403, detail="无权查看该报告历史")
+    condition = (ReportRevision.profile_id == report_id, ReportRevision.version_no < profile.version_no)
+    total = await db.scalar(select(func.count(ReportRevision.id)).where(*condition))
+    rows = (await db.scalars(select(ReportRevision).where(*condition).order_by(
+        ReportRevision.version_no.desc()).offset((page - 1) * 5).limit(5))).all()
+    return {"total": total, "page": page, "items": [{"version_no": r.version_no, "content": r.content} for r in rows]}
 
 
 @router.post("/reports/{report_id}/publish")
@@ -1588,27 +1692,32 @@ async def publish_report(
     user: User = Depends(require_role("teacher", "admin")),
     db: AsyncSession = Depends(get_db),
 ):
-    report = await db.get(MetacognitiveProfile, report_id)
+    report = await db.scalar(select(MetacognitiveProfile).where(MetacognitiveProfile.id == report_id)
+                            .execution_options(populate_existing=True).with_for_update())
     if report is None:
         raise HTTPException(status_code=404, detail="报告不存在")
     owner = await db.get(User, report.user_id)
     if owner is None or not can_access_user(user, owner):
         raise HTTPException(status_code=403, detail="无权发布该报告")
-    _quality_run, _quality_review, quality = await _quality_for_run(report.run_id, db)
-    if not quality_allows_analysis(quality):
-        raise HTTPException(status_code=409, detail="该测评未通过数据质量门槛，不能发布正式报告")
-    if report.requires_review_count > 0:
-        raise HTTPException(status_code=409, detail="仍有低置信度或分歧编码未处理")
-    new_workflow_pending = await _coding_unit_pending_for_run(report.run_id, db)
-    if new_workflow_pending is None:
+    if not data.review_confirmed or data.expected_generated_at is None:
+        raise HTTPException(status_code=422, detail="请确认已审阅并提供本版报告的生成时间")
+    if as_utc(data.expected_generated_at) != as_utc(report.generated_at):
+        raise HTTPException(status_code=409, detail="报告已重新生成，请刷新并审阅最新草稿后再发布")
+    checks = await _report_publication_checks(report, db)
+    hard_blockers = [
+        item["message"] for item in checks
+        if not item["passed"] and not item.get("overridable")
+    ]
+    risks = [
+        item["message"] for item in checks
+        if not item["passed"] and item.get("overridable")
+    ]
+    if hard_blockers:
+        raise HTTPException(status_code=409, detail="；".join(hard_blockers))
+    if risks and not data.acknowledge_risks:
         raise HTTPException(
             status_code=409,
-            detail="尚未为该测评创建固定双盲编码批次，不能发布正式报告",
-        )
-    if new_workflow_pending:
-        raise HTTPException(
-            status_code=409,
-            detail=f"仍有 {new_workflow_pending} 个盲编单元未形成共识或完成仲裁",
+            detail="存在以下风险，确认风险警告后仍可发布：" + "；".join(risks),
         )
     report.workflow_status = "published"
     report.is_provisional = False
@@ -1617,6 +1726,9 @@ async def publish_report(
     _audit(db, user, "report.publish", "metacognitive_profile", report.id, {
         "note": data.note.strip(),
         "coding_workflow": "fixed_blinded_batch",
+        "review_confirmed": data.review_confirmed,
+        "reviewed_generated_at": utc_isoformat(report.generated_at),
+        "acknowledged_risks": risks,
     })
     await _notify_report_published(db, report)
     return {"status": "published", "report_id": report.id}
@@ -1634,7 +1746,8 @@ async def bulk_publish_reports(
         try:
             await publish_report(
                 report_id,
-                ReportWorkflowIn(note=data.note),
+                ReportWorkflowIn(note=data.note, review_confirmed=data.review_confirmed,
+                                 expected_generated_at=data.reviewed_versions.get(report_id)),
                 user,
                 db,
             )
@@ -1876,6 +1989,10 @@ async def research_analytics(
 
 @router.get("/dashboard")
 async def research_dashboard(
+    reports_page: int = Query(default=1, ge=1),
+    reports_page_size: int = Query(default=10, ge=10, le=100),
+    pending_page: int = Query(default=1, ge=1),
+    pending_page_size: int = Query(default=10, ge=10, le=100),
     user: User = Depends(require_role("teacher", "admin")),
     db: AsyncSession = Depends(get_db),
 ):
@@ -1884,6 +2001,7 @@ async def research_dashboard(
         .join(User, User.id == AssessmentRun.user_id)
         .where(AssessmentRun.status == "completed")
         .options(*_quality_load_options())
+        .order_by(AssessmentRun.completed_at.desc(), AssessmentRun.id.desc())
     )
     runs = [(run, owner) for run, owner in run_result.all() if can_access_user(user, owner)]
     run_ids = [run.id for run, _ in runs]
@@ -1911,40 +2029,89 @@ async def research_dashboard(
     report_result = await db.execute(
         select(MetacognitiveProfile)
         .where(MetacognitiveProfile.run_id.in_(run_ids))
-        .order_by(MetacognitiveProfile.generated_at.desc())
+        .order_by(MetacognitiveProfile.generated_at.desc(), MetacognitiveProfile.id.desc())
     ) if run_ids else None
     reports = list(report_result.scalars().all()) if report_result else []
     analyzed_run_ids = {report.run_id for report in reports}
+    active_job_map = {}
+    if run_ids:
+        active_jobs = list((await db.scalars(
+            select(AnalysisJob).where(
+                AnalysisJob.active_run_id.in_(run_ids),
+                AnalysisJob.status.in_(("queued", "running")),
+            )
+        )).all())
+        for job in active_jobs:
+            active_job_map[job.active_run_id] = {
+                "id": job.id,
+                "status": job.status,
+                "progress": job.progress,
+                "heartbeat_at": utc_isoformat(job.heartbeat_at) if job.heartbeat_at else None,
+                "error_message": job.error_message,
+            }
+    # One grouped query replaces two per-report queries, including summary counts.
+    pending_by_run = {}
+    if analyzed_run_ids:
+        coding_rows = (await db.execute(
+            select(CodingUnit.run_id, CodingUnit.session_id, CodingBatch.id,
+                   func.sum(case((CodingUnit.status.in_(("agreed", "adjudicated")), 0), else_=1)))
+            .join(CodingBatch, CodingBatch.id == CodingUnit.batch_id)
+            .where(CodingUnit.run_id.in_(analyzed_run_ids))
+            .group_by(CodingUnit.run_id, CodingUnit.session_id, CodingBatch.id, CodingBatch.created_at)
+            .order_by(CodingBatch.created_at.desc(), CodingBatch.id.desc())
+        )).all()
+        seen_sessions = set()
+        for run_id, session_id, _batch_id, count in coding_rows:
+            if session_id not in seen_sessions:
+                pending_by_run[run_id] = pending_by_run.get(run_id, 0) + int(count or 0)
+                seen_sessions.add(session_id)
+        for run, _owner in runs:
+            if any(s.id not in seen_sessions for s in run.sessions):
+                pending_by_run.pop(run.id, None)
+    reports_page = min(reports_page, max(1, math.ceil(len(reports) / reports_page_size)))
+    report_start = (reports_page - 1) * reports_page_size
     recent_reports = []
-    for report in reports[:20]:
+    for report in reports[report_start:report_start + reports_page_size]:
         report_owner = run_owners.get(report.run_id)
-        double_review_pending = await _coding_unit_pending_for_run(
-            report.run_id,
-            db,
-        )
+        double_review_pending = pending_by_run.get(report.run_id)
         recent_reports.append({
             "id": report.id,
             "run_id": report.run_id,
             "user_id": report.user_id,
             "user_name": report_owner.name if report_owner else "未知学生",
             "username": report_owner.username if report_owner else "",
-            "score": report.overall_score,
+            "score": report.overall_score if report.overall_score_available else None,
             "status": report.workflow_status,
             "requires_review_count": report.requires_review_count,
             "double_review_pending": double_review_pending,
             "quality_status": quality_by_run[report.run_id]["effective_status"],
-            "generated_at": report.generated_at,
+            "generated_at": utc_isoformat(report.generated_at),
+            "version_no": report.version_no,
+            "can_reanalyze": report.workflow_status in {"draft", "review_pending", "reviewed"} and report.published_at is None,
         })
+    pending_runs = [(run, owner) for run, owner in runs
+                    if run.id not in analyzed_run_ids and quality_allows_analysis(quality_by_run[run.id])]
+    pending_page = min(pending_page, max(1, math.ceil(len(pending_runs) / pending_page_size)))
+    pending_start = (pending_page - 1) * pending_page_size
     return {
+        "reports_page": reports_page,
+        "reports_page_size": reports_page_size,
+        "pending_page": pending_page,
+        "pending_page_size": pending_page_size,
+        "unanalyzed_total": len(pending_runs),
         "completed_runs": len(runs),
         "reports": len(reports),
         "review_pending": sum(report.requires_review_count for report in reports),
+        # Count reports ready to publish without unresolved evidence/quality work.
+        # The total spans every page and must use the same latest-batch status as
+        # each report row; publication can still explicitly acknowledge risks.
         "publishable": sum(
-            item["requires_review_count"] == 0
-            and item["double_review_pending"] == 0
-            and item["quality_status"] in {"eligible", "included", "included_override"}
-            and item["status"] != "published"
-            for item in recent_reports
+            report.workflow_status in {"draft", "review_pending", "reviewed"}
+            and report.published_at is None
+            and report.requires_review_count == 0
+            and pending_by_run.get(report.run_id) == 0
+            and quality_allows_analysis(quality_by_run[report.run_id])
+            for report in reports
         ),
         "published": sum(report.workflow_status == "published" for report in reports),
         "quality": {
@@ -1981,12 +2148,11 @@ async def research_dashboard(
                     for s in sorted(run.sessions, key=lambda x: x.sequence_no)
                     if s.task
                 ] if run.sessions else [],
-                "completed_at": run.completed_at or run.created_at,
+                "completed_at": run.completed_at or run.started_at,
+                "active_job": active_job_map.get(run.id),
             }
-            for run, owner in runs
-            if run.id not in analyzed_run_ids
-            and quality_allows_analysis(quality_by_run[run.id])
-        ][:50],
+            for run, owner in pending_runs[pending_start:pending_start + pending_page_size]
+        ],
         "recent_reports": recent_reports,
     }
 
@@ -2253,7 +2419,7 @@ async def create_export(
                 "任务顺序": run.task_order_code,
                 "完成时间": utc_isoformat(run.completed_at),
                 "报告状态": profile.workflow_status if profile else "not_generated",
-                "综合得分": profile.overall_score if profile else "",
+                "综合得分": profile.overall_score if profile and profile.overall_score_available else "",
             }
             for item in scale_items:
                 row[question_columns[item.id]] = answers.get(item.id, "")
@@ -3430,7 +3596,7 @@ async def get_macro_analytics(
             if duration > 0:
                 group["durations"].append(duration)
                 group["densities"].append(float(accepted_by_run.get(run.id, 0)) / duration)
-        if profile is not None:
+        if profile is not None and profile.overall_score_available:
             group["scores"].append(float(profile.overall_score))
 
     def mean_or_none(values: list[float], digits: int = 1) -> float | None:
@@ -3440,7 +3606,7 @@ async def get_macro_analytics(
     ba_scores = groups["BA"]["scores"]
     test_result = {
         "available": False,
-        "metric": "综合画像得分",
+        "metric": "历史综合画像得分（不包含仅提供三维占比的新报告）",
         "t_statistic": None,
         "p_value": None,
         "levene_p_value": None,

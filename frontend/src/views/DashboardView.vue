@@ -16,6 +16,7 @@ const userStore = useUserStore()
 const reportStore = useReportStore()
 const report = computed(() => reportStore.latestReport)
 const reportCount = ref(0)
+const overallScoreAvailable = ref(false)
 const protocol = ref<AssessmentProtocol | null>(null)
 const currentRun = ref<AssessmentRun | null>(null)
 const isLoading = ref(true)
@@ -52,6 +53,7 @@ onMounted(async () => {
       if (latest) {
         try {
           const detail = (await reportApi.get(latest.id)).data
+          overallScoreAvailable.value = detail.overall_score_available !== false
           reportStore.addReport({
             id: detail.id,
             generatedAt: detail.generated_at,
@@ -106,7 +108,7 @@ onMounted(async () => {
 
       <section class="stats-grid">
         <StatCard icon="bi-clipboard-check" tone="purple" label="已发布报告" :value="reportCount" unit="次" hint="经研究审核后正式发布" />
-        <StatCard icon="bi-bullseye" tone="blue" label="最近综合分" :value="report?.overallScore ?? '--'" hint="阶段性学习反馈" />
+        <StatCard icon="bi-bullseye" tone="blue" label="报告反馈" :value="overallScoreAvailable ? report?.overallScore ?? '--' : report ? '三维占比' : '--'" hint="占比不等于能力综合分" />
         <StatCard icon="bi-clock-history" tone="coral" label="常模状态" value="--" hint="尚未建立正式常模" />
       </section>
 

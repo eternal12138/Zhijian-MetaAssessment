@@ -5,8 +5,8 @@ export interface ReportEvidence {
   excerpt: string
   scaleItemId: string
   reason: string
-  confidence: number
-  needsReview: boolean
+  confidence?: number | null
+  needsReview?: boolean
 }
 
 export interface ReportDimension {
@@ -29,6 +29,30 @@ export interface ReportRecommendation {
   difficulty: string
 }
 
+export interface MetacognitionPattern {
+  title: string
+  key: string
+  label: string
+  status: 'available' | 'provisional' | 'insufficient' | string
+  description: string
+  practice_focus: string
+  rule_version: string
+  comparison_basis: 'within_person' | string
+  effective_dialogue_count: number
+  is_provisional: boolean
+  relative_high_dimensions: string[]
+  relative_low_dimensions: string[]
+  scores: Record<string, number | null>
+  personal_mean: number | null
+  span: number | null
+  group_norm: {
+    status: 'not_connected' | 'available' | string
+    reference_id: string | null
+    reference_label: string | null
+    percentiles: Record<string, number> | null
+  }
+}
+
 export interface ReportDetail {
   id: string
   user_id: string
@@ -48,6 +72,11 @@ export interface ReportDetail {
   workflow_status: string
   version_no: number
   template_version: string
+  measurement_snapshot?: MetacognitionMeasurement | null
+  metacognition_pattern?: MetacognitionPattern | null
+  generation_metadata?: { status: string; model?: string; prompt_version?: string; data_version?: string; duration_seconds?: number } | null
+  overall_score_available?: boolean
+  evidence_is_provisional?: boolean | null
   published_at: string | null
   generated_at: string
 }
@@ -57,10 +86,21 @@ export interface ReportBrief {
   run_id: string | null
   session_id: string
   overall_score: number
+  overall_score_available?: boolean
   level: string
   is_provisional: boolean
   workflow_status: string
   generated_at: string
+}
+
+export interface ReportReview {
+  report: ReportDetail
+  owner: { name: string; username: string; class_group: string | null }
+  checks: Array<{ key: string; passed: boolean; message: string; route: string; overridable?: boolean }>
+  can_publish: boolean
+  risks: string[]
+  measurement: MetacognitionMeasurement | null
+  measurement_error: string
 }
 
 export interface MetacognitionMeasurement {
@@ -77,6 +117,14 @@ export interface MetacognitionMeasurement {
   denominator_breakdown?: Record<string, number>
   fallback_dialogue_count?: number
   unclassified_count?: number
+  evidence_status_counts?: Record<string, number>
+  retained_previous_count?: number
+  session_states?: Array<{
+    session_id: string; task_id: string; status: string
+    extraction_generation: number | null; latest_generation: number | null
+    latest_extraction_status: string | null; using_previous_extraction: boolean
+    model_versions: string[]
+  }>
   dimension_counts: {
     monitoring: number
     control_debugging: number
@@ -117,6 +165,14 @@ export const reportApi = {
 
   get(reportId: string) {
     return apiClient.get<ReportDetail>(`/reports/${reportId}`)
+  },
+
+  getByRun(runId: string) {
+    return apiClient.get<ReportDetail>(`/reports/runs/${runId}`)
+  },
+
+  review(reportId: string) {
+    return apiClient.get<ReportReview>(`/research/reports/${reportId}/review`)
   },
 
   list() {

@@ -15,6 +15,7 @@ class MethodTemplate(Base):
     __tablename__ = "method_templates"
     __table_args__ = (
         UniqueConstraint("template_key", "version", name="uq_method_template_version"),
+        Index("uq_method_template_active_key", "active_template_key", unique=True),
     )
 
     id: Mapped[str] = mapped_column(
@@ -25,6 +26,13 @@ class MethodTemplate(Base):
     kind: Mapped[str] = mapped_column(String(32), nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    # NULL values remain repeatable, while an active row exposes its template
+    # key and is therefore unique per prompt family.
+    active_template_key: Mapped[str | None] = mapped_column(
+        String(64),
+        Computed("CASE WHEN is_active THEN template_key ELSE NULL END", persisted=True),
+        nullable=True,
+    )
     created_by: Mapped[str | None] = mapped_column(
         String(36), ForeignKey("users.id"), nullable=True
     )
@@ -49,6 +57,11 @@ class AnalysisJob(Base):
     progress: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     error_message: Mapped[str] = mapped_column(Text, nullable=False, default="")
     context_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # NULL releases the slot. Unique constraints arbitrate across processes.
+    active_run_id: Mapped[str | None] = mapped_column(String(36), nullable=True, unique=True)
+    running_slot: Mapped[int | None] = mapped_column(Integer, nullable=True, unique=True)
+    payload: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     result_profile_id: Mapped[str | None] = mapped_column(
         String(36), ForeignKey("metacognitive_profiles.id"), nullable=True
     )

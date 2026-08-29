@@ -43,6 +43,7 @@ class AiEvaluationScopeOut(ApiModel):
     pending_count: int
     rejected_count: int
     classified_count: int
+    available_classified_count: int = 0
     training_participant: bool = False
     dimension_counts: dict[str, int] = Field(default_factory=dict)
 

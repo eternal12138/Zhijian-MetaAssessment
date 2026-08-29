@@ -44,6 +44,11 @@ class ReportOut(BaseModel):
     workflow_status: str = "draft"
     version_no: int = 1
     template_version: str = "draft-1"
+    measurement_snapshot: dict | None = None
+    metacognition_pattern: dict | None = None
+    generation_metadata: dict | None = None
+    overall_score_available: bool = True
+    evidence_is_provisional: bool | None = None
     published_at: datetime | None = None
     generated_at: datetime
 
@@ -56,6 +61,7 @@ class ReportBriefOut(BaseModel):
     run_id: str | None = None
     session_id: str
     overall_score: float
+    overall_score_available: bool = True
     level: str
     is_provisional: bool = True
     workflow_status: str = "draft"
@@ -80,6 +86,17 @@ class ReportGenerateIn(BaseModel):
     reanalyze: bool = False
 
 
+class MeasurementSessionState(BaseModel):
+    session_id: str
+    task_id: str
+    status: str
+    extraction_generation: int | None = None
+    latest_generation: int | None = None
+    latest_extraction_status: str | None = None
+    using_previous_extraction: bool = False
+    model_versions: list[str] = []
+
+
 class MetacognitionMeasurementOut(BaseModel):
     id: str
     user_id: str
@@ -94,6 +111,9 @@ class MetacognitionMeasurementOut(BaseModel):
     denominator_breakdown: dict[str, int] = {}
     fallback_dialogue_count: int = 0
     unclassified_count: int = 0
+    evidence_status_counts: dict[str, int] = {}
+    retained_previous_count: int = 0
+    session_states: list[MeasurementSessionState] = []
     dimension_counts: dict[str, int]
     dimension_scores: dict[str, float | None]
     score_available: bool

@@ -26,7 +26,7 @@ class DevMigrationRegistryTests(unittest.TestCase):
         self.assertIn('throw "Database migrations failed', block)
 
     def test_registry_contains_scope_and_correction_migrations_in_order(self):
-        self.assertEqual(migrate_all.SCRIPTS[-3:], ("migrate_phase32.py", "migrate_phase33.py", "migrate_phase34.py"))
+        self.assertEqual(migrate_all.SCRIPTS[-5:], ("migrate_phase32.py", "migrate_phase33.py", "migrate_phase34.py", "migrate_phase35.py", "migrate_phase36.py"))
         self.assertEqual(len(migrate_all.SCRIPTS), len(set(migrate_all.SCRIPTS)))
         for script in migrate_all.SCRIPTS:
             self.assertTrue((Path(migrate_all.__file__).parent / script).is_file())

@@ -33,11 +33,17 @@ class MetacognitiveProfile(Base):
     workflow_status: Mapped[str] = mapped_column(String(24), default="draft")
     version_no: Mapped[int] = mapped_column(Integer, default=1)
     template_version: Mapped[str] = mapped_column(String(32), default="draft-1")
+    evidence_snapshot: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    generation_metadata: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     published_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     published_by: Mapped[str | None] = mapped_column(
         String(36), ForeignKey("users.id"), nullable=True
     )
     generated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+    @property
+    def overall_score_available(self):
+        return self.evidence_snapshot is None
 
     user: Mapped["User"] = relationship(
         back_populates="reports",
@@ -45,6 +51,17 @@ class MetacognitiveProfile(Base):
     )
     session: Mapped["AssessmentSession"] = relationship(back_populates="report")
     suggestions: Mapped[list["LearningSuggestion"]] = relationship(back_populates="profile", cascade="all, delete-orphan")
+
+
+class ReportRevision(Base):
+    """Immutable successful report versions; never reconstruct legacy provenance."""
+    __tablename__ = "report_revisions"
+    __table_args__ = (Index("uq_report_revision", "profile_id", "version_no", unique=True),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    profile_id: Mapped[str] = mapped_column(String(36), ForeignKey("metacognitive_profiles.id", ondelete="CASCADE"))
+    version_no: Mapped[int] = mapped_column(Integer, nullable=False)
+    content: Mapped[dict] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
 class MetacognitionMeasurement(Base):

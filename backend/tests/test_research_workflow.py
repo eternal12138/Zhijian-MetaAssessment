@@ -25,8 +25,14 @@ from app.services.method_templates import DEFAULT_TEMPLATES
 
 class ResearchWorkflowTest(unittest.TestCase):
     def test_default_templates_are_replaceable_and_well_formed(self):
-        self.assertIn("{overall_score}", DEFAULT_TEMPLATES["report_prompt"]["content"])
-        self.assertIn("{dimension_results}", DEFAULT_TEMPLATES["report_prompt"]["content"])
+        report_prompt = DEFAULT_TEMPLATES["report_prompt"]["content"]
+        self.assertIn("{overall_score}", report_prompt)
+        self.assertIn("{dimension_results}", report_prompt)
+        self.assertIn("metacognition_pattern", report_prompt)
+        self.assertIn("group_norm.status", report_prompt)
+        self.assertIn("integrated", report_prompt)
+        for prefix in ("立即尝试：", "练习安排：", "效果检查："):
+            self.assertIn(prefix, report_prompt)
         self.assertIn("{segments}", DEFAULT_TEMPLATES["metacognitive_extractor"]["content"])
 
     def test_template_kind_is_constrained(self):

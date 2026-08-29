@@ -18,7 +18,10 @@ import zipfile
 REQUIRED = {
     "compose.yaml", "backend/Dockerfile", "frontend/Dockerfile",
     "backend/scripts/migrate_phase32.py", "backend/scripts/migrate_phase33.py", "backend/scripts/migrate_phase34.py",
-    "backend/scripts/migrate_all.py",
+    "backend/scripts/migrate_all.py", "backend/scripts/migrate_phase35.py", "backend/scripts/migrate_phase36.py",
+    "backend/scripts/report_worker.py", "backend/app/services/report_jobs.py",
+    "backend/app/services/report_evidence.py",
+    "backend/app/services/metacognition_pattern.py",
     "backend/app/services/metacognition_measurement.py",
     "frontend/src/views/DashboardView.vue",
     "frontend/src/components/dashboard/MacroAnalyticsDashboard.vue",

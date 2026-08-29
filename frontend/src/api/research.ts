@@ -25,8 +25,10 @@ export interface TemplateAudit {
 export interface AnalysisJob {
   id: string
   run_id: string
-  status: 'running' | 'completed' | 'failed'
+  status: 'queued' | 'running' | 'completed' | 'failed'
   progress: number
+  created_at?: string
+  heartbeat_at?: string | null
   error_message: string
   result_profile_id: string | null
 }
@@ -195,20 +197,34 @@ export interface ResearchDashboard {
       sequence_no: number
     }>
     completed_at?: string
+    active_job?: {
+      id: string
+      status: string
+      progress: number
+      heartbeat_at?: string | null
+      error_message?: string
+    } | null
   }>
+  unanalyzed_total: number
+  reports_page: number
+  reports_page_size: number
+  pending_page: number
+  pending_page_size: number
   recent_reports: Array<{
     id: string
     run_id: string
     user_id: string
     user_name: string
     username: string
-    score: number
+    score: number | null
     status: string
     requires_review_count: number
     /** null means no authoritative fixed blinded-coding batch exists yet. */
     double_review_pending: number | null
     quality_status: string
     generated_at: string
+    version_no: number
+    can_reanalyze: boolean
   }>
 }
 
@@ -272,6 +288,8 @@ export interface MacroRadarProfile {
   denominator_breakdown: Record<string, number>
   fallback_dialogue_count: number
   unclassified_count: number
+  evidence_status_counts?: Record<string, number>
+  retained_previous_count?: number
   score_available: boolean
   sample_count: number
   primary_source: 'expert_consensus' | 'production_model' | 'admin_upload' | 'hybrid' | 'none'
@@ -738,6 +756,7 @@ export interface AiEvaluationScopeItem {
   pending_count: number
   rejected_count: number
   classified_count: number
+  available_classified_count: number
   training_participant: boolean
   dimension_counts: Record<string, number>
 }
@@ -890,11 +909,28 @@ export const researchApi = {
   listTemplateAudit(limit = 200) {
     return apiClient.get<TemplateAudit[]>('/research/templates/audit', { params: { limit } })
   },
-  startAnalysis(runId: string, reanalyze = false) {
-    return apiClient.post<AnalysisJob>(`/research/analysis/runs/${runId}`, { reanalyze })
+  async startAnalysis(
+    runId: string,
+    reanalyze = false,
+    reportRefresh?: { report_only: true; expected_generated_at: string },
+    onProgress?: (job: AnalysisJob) => void,
+  ) {
+    let response = await apiClient.post<AnalysisJob>(`/research/analysis/runs/${runId}`, { reanalyze, ...reportRefresh })
+    const deadline = Date.now() + 65 * 60_000
+    onProgress?.(response.data)
+    while (['queued', 'running'].includes(response.data.status)) {
+      if (Date.now() > deadline) throw new Error('已停止等待，任务状态请在报告生成任务中查看；不要重复提交。')
+      await new Promise(resolve => window.setTimeout(resolve, 3000))
+      response = await apiClient.get<AnalysisJob>(`/research/analysis/jobs/${response.data.id}`)
+      onProgress?.(response.data)
+    }
+    return response
   },
-  dashboard() {
-    return apiClient.get<ResearchDashboard>('/research/dashboard')
+  listAnalysisJobs() {
+    return apiClient.get<AnalysisJob[]>('/research/analysis/jobs')
+  },
+  dashboard(params?: { reports_page: number; reports_page_size: number; pending_page: number; pending_page_size: number }) {
+    return apiClient.get<ResearchDashboard>('/research/dashboard', { params })
   },
   listRunQuality(params: {
     page?: number
@@ -983,8 +1019,8 @@ export const researchApi = {
       responseType: 'blob'
     })
   },
-  publishReport(reportId: string, note = '') {
-    return apiClient.post(`/research/reports/${reportId}/publish`, { note })
+  publishReport(reportId: string, note = '', review?: { review_confirmed: boolean; expected_generated_at: string; acknowledge_risks?: boolean }) {
+    return apiClient.post(`/research/reports/${reportId}/publish`, { note, ...review })
   },
   bulkPublishReports(reportIds: string[], note = '') {
     return apiClient.post<{ processed: number; skipped: number; errors: string[] }>(

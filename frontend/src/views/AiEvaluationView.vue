@@ -165,7 +165,7 @@ async function runEvaluation() {
         : `分类完成，共更新 ${processedTotal.value} 条；人工排除 ${result.skipped_rejected} 条未进入分类。`
       if (result.remaining === 0 || result.processed === 0) break
     }
-    notify(processedTotal.value ? 'AI 三分类已完成。' : '所选范围已是当前模型的最新结果。', 'success')
+    notify(processedTotal.value ? 'AI 三分类已完成，可刷新学生画像查看结果。' : '本次没有新增可分类候选；请核对当前转录的抽取状态和已分类数量。', processedTotal.value ? 'success' : 'primary')
     await load()
   } catch (error) {
     notify(error instanceof Error ? error.message : 'AI 分类执行失败', 'danger')
@@ -238,7 +238,7 @@ onMounted(load)
           <article v-for="group in groupedItems" :key="group.id" class="scope-card" :class="{ 'is-selected': isSelected(group.id) }" @click="scopeMode !== 'all' && toggleSelected(group.id)">
             <button v-if="scopeMode !== 'all'" class="scope-check" :aria-label="isSelected(group.id) ? '取消选择' : '选择'" @click.stop="toggleSelected(group.id)"><i class="bi" :class="isSelected(group.id) ? 'bi-check-square-fill' : 'bi-square'"></i></button>
             <div class="scope-main"><h3>{{ group.title }}</h3><p>{{ group.subtitle }}</p><span v-if="overview.training_source === 'system_gold' && group.items.some(item => item.training_participant)" class="training-data-badge"><i class="bi bi-mortarboard-fill"></i>该学生数据参与了当前模型训练</span><span v-else-if="overview.training_source === 'uploaded'" class="external-data-badge"><i class="bi bi-box-arrow-in-down"></i>当前模型使用外部上传训练数据</span></div>
-            <div class="scope-stats"><span><b>{{ sum(group.items, 'candidate_count') }}</b>候选</span><span><b>{{ sum(group.items, 'reviewed_count') }}</b>人工复核</span><span><b>{{ sum(group.items, 'pending_count') }}</b>AI 待复核</span><span class="classified"><b>{{ sum(group.items, 'classified_count') }}</b>已分类</span></div>
+            <div class="scope-stats"><span><b>{{ sum(group.items, 'candidate_count') }}</b>候选</span><span><b>{{ sum(group.items, 'reviewed_count') }}</b>人工复核</span><span><b>{{ sum(group.items, 'pending_count') }}</b>AI 待复核</span><span class="classified" title="当前权威转录的最新成功抽取版本中，分类成功且三类标签有效的候选；包含旧模型仍有效的分类。"><b>{{ sum(group.items, 'available_classified_count') }}</b>可用分类</span><span title="可用分类中由当前启用模型完成的数量；切换模型不会抹除历史有效画像。"><b>{{ sum(group.items, 'classified_count') }}</b>当前模型已分类</span></div>
             <div class="dimension-strip"><span class="monitoring">监控 {{ dimensionSum(group.items, 'monitoring') }}</span><span class="regulation">调控 {{ dimensionSum(group.items, 'regulation') }}</span><span class="evaluation">评估 {{ dimensionSum(group.items, 'evaluation') }}</span></div>
           </article>
           <div v-if="!groupedItems.length" class="empty-state">当前权限与筛选条件下没有可评估的候选数据。</div>

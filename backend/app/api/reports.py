@@ -71,6 +71,8 @@ async def _load_profile(
 
 
 def _report_out(report: MetacognitiveProfile) -> ReportOut:
+    from app.services.report_evidence import snapshot_measurement
+    metadata = report.generation_metadata or {}
     return ReportOut(
         id=report.id,
         user_id=report.user_id,
@@ -100,6 +102,14 @@ def _report_out(report: MetacognitiveProfile) -> ReportOut:
         workflow_status=report.workflow_status,
         version_no=report.version_no,
         template_version=report.template_version,
+        overall_score_available=(
+            not bool(report.evidence_snapshot)
+            and report.analysis_method != "unified_evidence"
+        ),
+        evidence_is_provisional=report.evidence_snapshot.get("is_provisional") if report.evidence_snapshot else None,
+        measurement_snapshot=snapshot_measurement(report.evidence_snapshot),
+        metacognition_pattern=(report.evidence_snapshot or {}).get("metacognition_pattern"),
+        generation_metadata={k: v for k, v in metadata.items() if k != "prompt_snapshot"} or None,
         published_at=report.published_at,
         generated_at=report.generated_at,
     )
@@ -142,6 +152,9 @@ async def _measurement_out(
         denominator_breakdown=getattr(measurement, "denominator_breakdown", {}),
         fallback_dialogue_count=getattr(measurement, "fallback_dialogue_count", 0),
         unclassified_count=getattr(measurement, "unclassified_count", 0),
+        evidence_status_counts=getattr(measurement, "evidence_status_counts", {}),
+        retained_previous_count=getattr(measurement, "retained_previous_count", 0),
+        session_states=getattr(measurement, "session_states", []),
         dimension_counts={
             "monitoring": measurement.monitoring_count,
             "control_debugging": measurement.control_debugging_count,
@@ -302,42 +315,15 @@ async def get_metacognition_measurement(
     return await _measurement_out(measurement, db)
 
 
-@router.post("/runs/{run_id}/generate", response_model=ReportOut)
-async def generate_report(
-    run_id: str,
-    data: ReportGenerateIn | None = None,
-    user: User = Depends(require_role("teacher", "admin")),
-    db: AsyncSession = Depends(get_db),
+@router.post("/runs/{run_id}/generate", status_code=202)
+async def generate_report_for_run(
+    run_id: str, data: ReportGenerateIn | None = None,
+    user: User = Depends(require_role("teacher", "admin")), db: AsyncSession = Depends(get_db),
 ):
-    """对双任务转录进行编码，并按运行快照选择是否合并任务后问卷。"""
-    run = await _ensure_run_access(run_id, user, db)
-    if run.status != "completed":
-        raise HTTPException(status_code=409, detail="完整测评尚未结束，不能生成报告")
-    previous_profile = await _load_profile(run_id=run_id, db=db)
-    try:
-        await generate_run_report(
-            run_id,
-            db,
-            reanalyze=(data.reanalyze if data else False),
-        )
-    except ValueError as error:
-        raise HTTPException(status_code=409, detail=str(error)) from error
-    report = await _load_profile(run_id=run_id, db=db)
-    if report is None:
-        raise HTTPException(status_code=500, detail="报告生成失败")
-    if previous_profile is None:
-        if report.requires_review_count > 0:
-            student = await db.get(User, run.user_id)
-            if student is not None:
-                await notify_reviewers(
-                    db,
-                    student=student,
-                    event_key_prefix=f"report-review-pending:{report.id}",
-                    title="有新的编码等待复核",
-                    content=f"一份测评报告包含 {report.requires_review_count} 条低置信度编码。",
-                    metadata={"run_id": run.id, "report_id": report.id},
-                )
-    return _report_out(report)
+    # Legacy URL uses the SAME queue, quality checks and permissions.
+    from app.api.research import start_analysis
+    from app.schemas.research import AnalysisStartIn
+    return await start_analysis(run_id, AnalysisStartIn(reanalyze=data.reanalyze if data else False), user, db)
 
 
 @router.get("/runs/{run_id}", response_model=ReportOut)

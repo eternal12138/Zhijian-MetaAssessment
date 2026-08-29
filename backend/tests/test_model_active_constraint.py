@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy.schema import CreateTable, CreateIndex
 
 from app.database import Base
-from app.models.research import ModelTrainingJob
+from app.models.research import MethodTemplate, ModelTrainingJob
 from app.models.user import User
 
 
@@ -75,3 +75,32 @@ class ActiveModelConstraintTests(unittest.TestCase):
         index = next(i for i in table.indexes if i.name == 'uq_training_active_scope')
         self.assertTrue(index.unique)
         self.assertIn('CREATE UNIQUE INDEX', str(CreateIndex(index).compile(dialect=mysql.dialect())))
+
+    def test_only_one_active_version_per_template_key(self):
+        first = MethodTemplate(template_key='report_prompt', version='v1', kind='prompt',
+                               content='first', is_active=True)
+        self.db.add(first)
+        self.db.commit()
+        self.db.refresh(first)
+        self.assertEqual(first.active_template_key, 'report_prompt')
+        self.db.add(MethodTemplate(template_key='report_prompt', version='v2', kind='prompt',
+                                   content='second', is_active=True))
+        with self.assertRaises(IntegrityError):
+            self.db.commit()
+        self.db.rollback()
+
+    def test_different_template_keys_can_each_be_active(self):
+        self.db.add_all([
+            MethodTemplate(template_key='report_prompt', version='v1', kind='prompt', content='one', is_active=True),
+            MethodTemplate(template_key='metacognitive_extractor', version='v1', kind='prompt', content='two', is_active=True),
+        ])
+        self.db.commit()
+        self.assertEqual(len(self.db.scalars(select(MethodTemplate).where(
+            MethodTemplate.is_active.is_(True))).all()), 2)
+
+    def test_mysql_template_schema_has_active_key_constraint(self):
+        table = MethodTemplate.__table__
+        ddl = str(CreateTable(table).compile(dialect=mysql.dialect()))
+        self.assertIn('CASE WHEN is_active THEN template_key ELSE NULL END', ddl)
+        index = next(i for i in table.indexes if i.name == 'uq_method_template_active_key')
+        self.assertTrue(index.unique)

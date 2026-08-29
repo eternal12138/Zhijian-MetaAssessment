@@ -144,13 +144,13 @@ try {
             }
             Add-ReleaseEntry $zip $entryName $bytes
         }
-        $marker = [ordered]@{ release_id = $releaseId; created_at_utc = $createdAt; schema_phase = 34 }
+        $marker = [ordered]@{ release_id = $releaseId; created_at_utc = $createdAt; schema_phase = 36 }
         Add-ReleaseEntry $zip 'frontend/public/release.json' ([System.Text.Encoding]::UTF8.GetBytes(($marker | ConvertTo-Json)))
         $manifest = [ordered]@{
             format_version = 1
             release_id = $releaseId
             created_at_utc = $createdAt
-            schema_phase = 34
+            schema_phase = 36
             retired_files = $retiredFiles
             files = @($fileManifest.ToArray())
         } | ConvertTo-Json -Depth 8

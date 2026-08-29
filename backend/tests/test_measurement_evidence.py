@@ -4,6 +4,7 @@ import io
 import unittest
 from datetime import datetime, timedelta
 from types import SimpleNamespace as NS
+from unittest.mock import AsyncMock, patch
 
 from fastapi import FastAPI, HTTPException, UploadFile
 from fastapi.testclient import TestClient
@@ -13,6 +14,9 @@ from sqlalchemy.pool import StaticPool
 
 from app.models import Base, User, AssessmentTask, AssessmentRun, AssessmentSession, TranscriptVersion
 from app.models import ExtractionJob, ExtractionCandidate, CodingBatch, CodingUnit, MeasurementCorrection
+from app.models.research import ModelTrainingJob
+from app.api import ai_evaluation
+from app.schemas.ai_evaluation import AiEvaluationRunIn
 from app.api.reports import router, upload_measurement_corrections, list_metacognition_measurements, get_metacognition_measurement
 from app.api.research import get_macro_analytics
 from app.core.security import get_current_user
@@ -31,6 +35,8 @@ class AsyncAdapter:
     async def scalars(self, stmt): return self.db.scalars(stmt)
     async def get(self, model, key): return self.db.get(model, key)
     async def flush(self): self.db.flush()
+    async def commit(self): self.db.commit()
+    async def rollback(self): self.db.rollback()
     def add(self, row): self.db.add(row)
 
 
@@ -67,7 +73,7 @@ class EvidencePolicyTests(unittest.TestCase):
         self.assertEqual(result["scores"], [])
 
     def test_expert_overrides_only_matching_candidate(self):
-        unit = NS(candidate_id="candidate", final_dimension="evaluation", batch_id="b")
+        unit = NS(id="unit", candidate_id="candidate", final_dimension="evaluation", batch_id="b")
         row = resolve_session_evidence(job=NS(id="j", status="reviewed"), candidates=[self.candidate()], units=[unit])
         self.assertEqual(row["counts"]["evaluation"], 1)
         self.assertEqual(row["counts"]["monitoring"], 0)
@@ -187,6 +193,166 @@ class EvidenceDatabaseTests(unittest.TestCase):
         self.sync.flush()
         result = asyncio.run(load_run_evidence(["run"], self.db))["run"]
         self.assertEqual(result["total"], 0)
+
+    def test_report_snapshot_uses_same_denominator_and_detects_text_only_edit(self):
+        from app.services.report_evidence import build_report_snapshot, snapshot_measurement
+        self.add_job()
+        self.add_job('s2', status='reviewing', labels=('regulation',))
+        snapshot=asyncio.run(build_report_snapshot('run', self.db))
+        measurement=asyncio.run(calculate_and_persist_measurement(self.run,self.db))
+        self.assertEqual(snapshot['effective_dialogue_count'],measurement.effective_dialogue_count)
+        self.assertEqual(snapshot['counts']['monitoring'],measurement.monitoring_count)
+        self.assertEqual(snapshot_measurement(snapshot)['dimension_scores']['monitoring'],measurement.monitoring_score)
+        self.assertTrue(snapshot['is_provisional'])
+        self.assertEqual(snapshot['metacognition_pattern']['status'], 'insufficient')
+        self.assertEqual(snapshot['metacognition_pattern']['group_norm']['status'], 'not_connected')
+        candidate=self.sync.scalar(select(ExtractionCandidate))
+        candidate.clean_text='人工更正后的文字';self.sync.flush()
+        changed=asyncio.run(build_report_snapshot('run',self.db))
+        self.assertNotEqual(changed['data_version'],snapshot['data_version'])
+        self.assertEqual(changed['counts'],snapshot['counts'])
+
+    def ai_overview(self):
+        model = self.sync.get(ModelTrainingJob, "test-model")
+        if model is None:
+            model = ModelTrainingJob(id="test-model", version="test-model", requested_by="admin", status="completed", is_active=True,
+                config_snapshot={"experiment_type":"tfidf_linear_svc", "dataset_source":"uploaded"})
+            self.sync.add(model); self.sync.flush()
+        with patch.object(ai_evaluation, "_model_cards", new=AsyncMock(return_value=([model], None))):
+            return asyncio.run(ai_evaluation.overview(db=self.db, user=self.admin))
+
+    def test_pending_and_failed_extractions_do_not_hide_completed_classification(self):
+        old = self.add_job(labels=("monitoring",))
+        old.created_at = datetime(2026,8,1)
+        candidate = self.sync.scalar(select(ExtractionCandidate).where(ExtractionCandidate.extraction_job_id == old.id))
+        self.ai_overview()
+        candidate.classifier_job_id = "test-model"
+        newest = self.add_job(status="queued", generation=2, labels=())
+        for status in ["queued", "running", "retry_wait", "failed"]:
+            newest.status=status; self.sync.flush()
+            with self.subTest(status=status):
+                self.assertEqual(self.ai_overview().scope_items[0].classified_count, 1)
+                m = asyncio.run(calculate_and_persist_measurement(self.run, self.db))
+                self.assertTrue(m.score_available)
+                self.assertEqual(m.monitoring_count, 1)
+                self.assertEqual(m.retained_previous_count, 1)
+                self.assertEqual(m.session_states[0]["extraction_generation"], 1)
+                for role in [self.student, self.teacher, self.admin]:
+                    result=asyncio.run(get_macro_analytics(class_group="all", participant_id=None if role.role=="student" else "student", user=role, db=self.db))
+                    p=result["radar_profiles"]["participant"]
+                    self.assertEqual(p["counts"]["monitoring"], 1)
+                    self.assertEqual(p["retained_previous_count"], 1)
+                    self.assertNotIn("session_states", p)
+
+    def test_real_enqueue_superseded_history_retains_success_and_reviewed_denominator(self):
+        old = self.add_job(labels=("monitoring", "non_metacognitive"))
+        old.status = "superseded"
+        old.completed_at = datetime(2026,8,1)
+        self.add_job(status="failed", generation=2, labels=())
+        m=asyncio.run(calculate_and_persist_measurement(self.run,self.db))
+        self.assertTrue(m.score_available)
+        self.assertEqual(m.effective_dialogue_count,2)
+        self.assertEqual(m.monitoring_score,0.5)
+        self.assertEqual(m.denominator_breakdown,{"human_review":2})
+        self.assertEqual(self.ai_overview().scope_items[0].available_classified_count,1)
+        # A newer superseded unfinished attempt must not displace valid history.
+        unfinished=self.add_job(status="superseded",generation=3,labels=())
+        unfinished.completed_at=None
+        self.add_job(status="queued",generation=4,labels=())
+        m=asyncio.run(calculate_and_persist_measurement(self.run,self.db))
+        self.assertEqual(m.session_states[0]["extraction_generation"],1)
+        # Even an empty completed version replaces old labels, not vice versa.
+        unfinished.completed_at=datetime(2026,8,3)
+        self.sync.flush()
+        m=asyncio.run(calculate_and_persist_measurement(self.run,self.db))
+        self.assertFalse(m.score_available)
+        self.assertEqual(m.session_states[0]["extraction_generation"],3)
+
+    def test_completed_new_extraction_never_borrows_old_classification(self):
+        self.add_job(labels=("monitoring",))
+        new = self.add_job(status="completed", generation=2, labels=("evaluation",))
+        c = self.sync.scalar(select(ExtractionCandidate).where(ExtractionCandidate.extraction_job_id==new.id))
+        c.classification_status="pending_classification"; c.predicted_dimension=None
+        self.sync.flush()
+        m=asyncio.run(calculate_and_persist_measurement(self.run, self.db))
+        self.assertFalse(m.score_available)
+        self.assertEqual(m.session_states[0]["status"], "classification_pending")
+        c.classification_error="provider unavailable";self.sync.flush()
+        failed=asyncio.run(calculate_and_persist_measurement(self.run,self.db))
+        self.assertEqual(failed.session_states[0]["status"],"classification_failed")
+        c.classification_status="classified"; c.predicted_dimension="evaluation"; self.sync.flush()
+        m=asyncio.run(calculate_and_persist_measurement(self.run, self.db))
+        self.assertTrue(m.score_available)
+        self.assertEqual(m.monitoring_count,0); self.assertEqual(m.evaluation_count,1)
+
+    def test_authoritative_transcript_change_excludes_old_ai_results(self):
+        self.add_job(labels=("monitoring",))
+        self.sync.get(TranscriptVersion,"v1").is_authoritative=False
+        self.sync.add(TranscriptVersion(id="replacement",session_id="s1",version_no=2,source="human_corrected",is_authoritative=True,full_text="new"))
+        self.sync.flush()
+        self.assertEqual(self.ai_overview().scope_items, [])
+        m=asyncio.run(calculate_and_persist_measurement(self.run,self.db))
+        self.assertFalse(m.score_available)
+        self.assertEqual(m.session_states[0]["status"], "awaiting_extraction")
+
+    def test_ai_counts_require_valid_success_and_keep_old_model_availability(self):
+        job=self.add_job(status="completed",labels=("regulation",))
+        self.ai_overview()
+        c=self.sync.scalar(select(ExtractionCandidate).where(ExtractionCandidate.extraction_job_id==job.id))
+        c.classifier_job_id="test-model"; self.sync.flush()
+        self.assertEqual(self.ai_overview().scope_items[0].classified_count,1)
+        self.assertEqual(self.ai_overview().scope_items[0].dimension_counts["regulation"],1)
+        for flag,label in [("pending_classification","monitoring"),("failed","monitoring"),("classified",None),("classified","planning")]:
+            c.classification_status=flag;c.predicted_dimension=label;self.sync.flush()
+            self.assertEqual(self.ai_overview().scope_items[0].classified_count,0)
+            self.assertFalse(asyncio.run(calculate_and_persist_measurement(self.run,self.db)).score_available)
+        c.classification_status="classified";c.predicted_dimension="monitoring";c.classifier_job_id=None;self.sync.flush()
+        row=self.ai_overview().scope_items[0]
+        self.assertEqual(row.classified_count,0);self.assertEqual(row.available_classified_count,1)
+        self.assertTrue(asyncio.run(calculate_and_persist_measurement(self.run,self.db)).score_available)
+
+    def test_new_empty_or_all_rejected_extraction_has_explicit_reason(self):
+        self.add_job(labels=("monitoring",))
+        new=self.add_job(status="completed",generation=2,labels=())
+        m=asyncio.run(calculate_and_persist_measurement(self.run,self.db))
+        self.assertFalse(m.score_available);self.assertEqual(m.session_states[0]["status"],"no_candidates")
+        self.sync.add(ExtractionCandidate(extraction_job_id=new.id,session_id="s1",run_id="run",user_id="student",task_id="t1",sequence_no=0,raw_asr_text="x",original_text="x",clean_text="x",review_status="rejected",classification_status="classified",predicted_dimension="monitoring"))
+        self.sync.flush()
+        m=asyncio.run(calculate_and_persist_measurement(self.run,self.db))
+        self.assertFalse(m.score_available);self.assertEqual(m.session_states[0]["status"],"all_rejected")
+
+    def test_classifier_targets_current_successful_version_and_rejects_invalid_output(self):
+        old=self.add_job(labels=("monitoring",));old.status="superseded";old.completed_at=datetime(2026,8,1)
+        new=self.add_job(status="queued",generation=2,labels=())
+        self.ai_overview();self.sync.commit()
+        seen=[]
+        async def predict(db,candidates):
+            seen.extend(c.extraction_job_id for c in candidates)
+            for c in candidates:
+                c.classification_status="classified";c.classifier_job_id="test-model";c.predicted_dimension="evaluation"
+        with patch.object(ai_evaluation,"classify_candidates",new=predict):
+            result=asyncio.run(ai_evaluation.classify_scope(AiEvaluationRunIn(scope="session",ids=["s1"]),db=self.db,user=self.admin))
+        self.assertEqual(seen,[old.id]);self.assertEqual(result.remaining,0)
+        self.assertEqual(asyncio.run(calculate_and_persist_measurement(self.run,self.db)).evaluation_count,1)
+        c=self.sync.scalar(select(ExtractionCandidate).where(ExtractionCandidate.extraction_job_id==old.id))
+        c.predicted_dimension=None;self.sync.commit()
+        async def invalid(db,candidates):
+            for c in candidates:c.predicted_dimension="non_meta";c.classification_status="classified"
+        with patch.object(ai_evaluation,"classify_candidates",new=invalid), self.assertRaises(HTTPException) as raised:
+            asyncio.run(ai_evaluation.classify_scope(AiEvaluationRunIn(scope="session",ids=["s1"]),db=self.db,user=self.admin))
+        self.assertEqual(raised.exception.status_code,409)
+        self.assertIn("本批次未保存",raised.exception.detail)
+        self.assertIsNone(self.sync.get(ExtractionCandidate,c.id).predicted_dimension)
+
+    def test_old_candidate_expert_unit_does_not_leak_into_new_extraction(self):
+        old=self.add_job(labels=("monitoring",))
+        c=self.sync.scalar(select(ExtractionCandidate).where(ExtractionCandidate.extraction_job_id==old.id))
+        batch=CodingBatch(id="old-batch",name="old",reviewer_a_id="admin",reviewer_b_id="teacher",adjudicator_id="admin",created_by="admin",status="completed")
+        self.sync.add(batch);self.sync.flush()
+        self.sync.add(CodingUnit(batch_id=batch.id,candidate_id=c.id,session_id="s1",run_id="run",task_id="t1",sequence_no=0,segment="x",status="agreed",final_dimension="monitoring"))
+        self.add_job(status="completed",generation=2,labels=())
+        m=asyncio.run(calculate_and_persist_measurement(self.run,self.db))
+        self.assertFalse(m.score_available);self.assertEqual(m.monitoring_count,0)
 
     def test_all_completed_rounds_paginate_without_scores_or_published_reports(self):
         for i in range(205):

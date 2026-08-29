@@ -34,6 +34,14 @@ class TemplateAuditOut(BaseModel):
 
 class AnalysisStartIn(BaseModel):
     reanalyze: bool = False
+    report_only: bool = False
+    expected_generated_at: datetime | None = None
+
+    @model_validator(mode="after")
+    def validate_report_refresh(self):
+        if self.report_only and (self.reanalyze or self.expected_generated_at is None):
+            raise ValueError("重新 AI 分析草稿必须提供生成时间，且不能同时重新编码")
+        return self
 
 
 class AnalysisJobOut(BaseModel):
@@ -41,6 +49,7 @@ class AnalysisJobOut(BaseModel):
     run_id: str
     status: str
     progress: int
+    heartbeat_at: datetime | None = None
     error_message: str
     result_profile_id: str | None
     created_at: datetime
@@ -300,10 +309,14 @@ class ExportDownloadTicketOut(BaseModel):
 
 class ReportWorkflowIn(BaseModel):
     note: str = Field(default="", max_length=1000)
+    review_confirmed: bool = False
+    expected_generated_at: datetime | None = None
+    acknowledge_risks: bool = False
 
 
 class BulkReportPublishIn(ReportWorkflowIn):
     report_ids: list[str] = Field(min_length=1, max_length=100)
+    reviewed_versions: dict[str, datetime] = Field(default_factory=dict)
 
 
 class QualityCheckOut(BaseModel):

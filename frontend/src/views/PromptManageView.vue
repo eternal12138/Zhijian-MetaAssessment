@@ -797,7 +797,7 @@ const definitions = {
   report_prompt: {
     label: 'AI 报告与元认知画像提示词',
     kind: 'prompt',
-    help: '必须保留 {overall_score} 与 {dimension_results} 占位符；指导火山方舟大模型依据监控、调控、评估三分类评估结果与证据，端到端生成综合画像诊断、等级评定与个性化学习干预策略。'
+    help: '保留 {overall_score} 与 {dimension_results} 占位符以兼容现有模板。新报告不计算能力综合分；模型依据统一证据快照和本轮元认知模式，生成一至三项个性化提升策略，不生成诊断、常模等级或稳定人格类型。保存新版本后须启用才会用于后续生成。'
   },
   metacognitive_extractor: {
     label: '元认知候选抽取提示词',
@@ -809,6 +809,9 @@ const definitions = {
 const activeTemplate = computed(() =>
   templates.value.find(item => item.template_key === selectedKey.value && item.is_active)
 )
+function isCanonicalActiveTemplate(item: MethodTemplate) {
+  return item.id === activeTemplate.value?.id
+}
 const history = computed(() =>
   templates.value.filter(item => item.template_key === selectedKey.value)
 )
@@ -839,7 +842,7 @@ function selectTemplate(key: MethodTemplate['template_key'], clearMessages = tru
 function viewHistory(item: MethodTemplate) {
   viewedTemplateId.value = item.id
   content.value = item.content
-  templateSuccessMessage.value = `正在查看历史版本 ${item.version}${item.is_active ? '（当前启用）' : ''}。`
+  templateSuccessMessage.value = `正在查看历史版本 ${item.version}${isCanonicalActiveTemplate(item) ? '（当前启用）' : ''}。`
   templateErrorMessage.value = ''
 }
 
@@ -2258,7 +2261,7 @@ onBeforeUnmount(() => {
             <div class="small fw-semibold mb-2">历史版本</div>
             <div v-for="item in history" :key="item.id" class="version-row" :class="{ 'is-viewed': viewedTemplateId === item.id }">
               <button class="version-view" @click="viewHistory(item)">{{ item.version }}</button>
-              <span v-if="item.is_active" class="badge bg-success">启用中</span>
+              <span v-if="isCanonicalActiveTemplate(item)" class="badge bg-success">启用中</span>
               <button v-else class="btn btn-sm btn-outline-primary" :disabled="activatingTemplateId === item.id" @click="activateHistory(item)">启用</button>
             </div>
           </div>

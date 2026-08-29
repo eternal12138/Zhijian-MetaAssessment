@@ -77,8 +77,14 @@ def aggregate_distribution(
     denominator = 0
     denominator_sources: dict[str, int] = {}
     unclassified_count = 0
+    evidence_status_counts = {}
+    retained_previous_count = 0
     for run_id in dict.fromkeys(str(value) for value in run_ids if value):
         row = resolved_by_run.get(run_id)
+        if row:
+            for state, count in row.get("evidence_status_counts", {}).items():
+                evidence_status_counts[state] = evidence_status_counts.get(state, 0) + count
+            retained_previous_count += row.get("retained_previous_count", 0)
         if not row or int(row.get("effective_dialogue_count", sum(row["counts"].values()))) <= 0:
             continue
         contributing_runs += 1
@@ -108,6 +114,8 @@ def aggregate_distribution(
         "denominator_breakdown": denominator_sources,
         "fallback_dialogue_count": denominator_sources.get("label_total_fallback", 0),
         "unclassified_count": unclassified_count,
+        "evidence_status_counts": evidence_status_counts,
+        "retained_previous_count": retained_previous_count,
         "score_available": denominator > 0 and (total > 0 or unclassified_count == 0),
         "sample_count": contributing_runs,
         "primary_source": source,

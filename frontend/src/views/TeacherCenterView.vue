@@ -1,5 +1,8 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { useLatestRequest } from '../composables/useLatestRequest'
+import SectionPagination from '../components/ui/SectionPagination.vue'
+import ReportGenerationJobs from '../components/dashboard/ReportGenerationJobs.vue'
 import { useUserStore } from '../stores/user'
 import {
   researchApi,
@@ -33,11 +36,12 @@ const exportDialogOpen = ref(false)
 const exportPreview = ref<AudioTranscriptExportPreview | null>(null)
 const exportPreviewLoading = ref(false)
 let exportPreviewRequestId = 0
-const publishingId = ref('')
+const generatedDraftRunId = ref('')
 const analyzingId = ref('')
 const analysisErrorMsg = ref('')
 const batchAnalyzing = ref(false)
 const batchAnalyzeProgress = ref({ current: 0, total: 0 })
+const analysisProgress = ref<Record<string, number>>({})
 const errorMessage = ref('')
 const sectionErrors = ref<string[]>([])
 const successMessage = ref('')
@@ -45,24 +49,39 @@ const exportExpanded = ref(false)
 const transcriptAttention = ref(0)
 const codingAssignments = ref(0)
 const codingDisagreements = ref(0)
-const selectedReportIds = ref<string[]>([])
-const bulkPublishing = ref(false)
 const qualityRuns = ref<RunQuality[]>([])
 const qualitySearch = ref('')
 const qualityFilter = ref('attention')
 const qualityPage = ref(1)
-const qualityPageSize = ref(20)
+const qualityPageSize = ref(10)
 const qualityTotal = ref(0)
 const taskOrderSearch = ref('')
 const taskOrderPage = ref(1)
-const taskOrderPageSize = ref(50)
+const taskOrderPageSize = ref(10)
+const reportsPage = ref(1)
+const reportsPageSize = ref(10)
+type RecentReport = ResearchDashboard['recent_reports'][number]
+type PendingRun = ResearchDashboard['unanalyzed_runs'][number]
+const selectedReports = ref<string[]>([])
+const refreshingReportId = ref('')
+const refreshingReports = ref(false)
+const stopReportRefresh = ref(false)
+const reportRefreshProgress = ref({ completed: 0, total: 0 })
+const reportRefreshResults = ref<Array<{ id: string; name: string; success: boolean; message: string }>>([])
+const reportActionsBusy = computed(() => refreshingReports.value || batchAnalyzing.value || !!analyzingId.value)
+const selectableReports = computed(() => (dashboard.value?.recent_reports ?? []).filter(canReanalyzeReport))
+const allReportsSelected = computed(() => selectableReports.value.length > 0 && selectableReports.value.every(item => selectedReports.value.includes(item.id)))
+const pendingPage = ref(1)
+const pendingPageSize = ref(10)
+const { run: requestQuality, invalidate: invalidateQuality, loading: qualityLoading, error: qualityError } = useLatestRequest()
+const { run: requestOrders, invalidate: invalidateOrders, loading: ordersLoading, error: ordersError } = useLatestRequest()
+const { run: requestDashboard, invalidate: invalidateDashboard, loading: dashboardLoading, error: dashboardError } = useLatestRequest()
+let syncingDashboardPages = false
 const qualityDecisionTarget = ref<RunQuality | null>(null)
 const qualityDecision = ref<'automatic' | 'included' | 'excluded'>('included')
 const qualityReason = ref('')
 const qualitySaving = ref(false)
 const userStore = useUserStore()
-const qualityPageCount = computed(() => Math.max(1, Math.ceil(qualityTotal.value / qualityPageSize.value)))
-const taskOrderPageCount = computed(() => Math.max(1, Math.ceil((taskOrders.value?.total ?? 0) / taskOrderPageSize.value)))
 const macroClassGroups = computed(() => Array.from(new Set(
   (taskOrders.value?.students ?? [])
     .map(student => student.class_group?.trim())
@@ -72,20 +91,7 @@ const macroClassGroups = computed(() => Array.from(new Set(
 const pageTitle = computed(() => (
   userStore.profile.role === 'admin' ? '系统与研究概览' : '教师与研究中心'
 ))
-const filteredQualityRuns = computed(() => {
-  const keyword = qualitySearch.value.trim().toLocaleLowerCase('zh-CN')
-  return qualityRuns.value.filter(item => {
-    const matchesSearch = !keyword
-      || item.name.toLocaleLowerCase('zh-CN').includes(keyword)
-      || item.username.toLocaleLowerCase('zh-CN').includes(keyword)
-      || (item.class_group || '').toLocaleLowerCase('zh-CN').includes(keyword)
-    const matchesStatus = !qualityFilter.value
-      || (qualityFilter.value === 'attention'
-        ? ['review_required', 'ineligible'].includes(item.effective_status)
-        : item.effective_status === qualityFilter.value)
-    return matchesSearch && matchesStatus
-  })
-})
+// Search/status filtering belongs to the server, before pagination.
 
 const agreementText = computed(() => {
   const value = analytics.value?.agreement.dimension_percent_agreement
@@ -126,7 +132,91 @@ const reliabilityPresentation = computed(() => {
 })
 
 function reportStatusLabel(status: string) {
-  return ({ draft: '草稿', published: '已发布', archived: '已归档' } as Record<string, string>)[status] || status
+  return ({ draft: '草稿 · 待审阅', review_pending: '草稿 · 待审阅', reviewed: '草稿 · 待发布确认', published: '已发布', archived: '已归档' } as Record<string, string>)[status] || '状态待确认'
+}
+
+function reportStatusClass(status: string) {
+  if (status === 'published') return 'bg-success-subtle text-success-emphasis'
+  if (status === 'review_pending') return 'bg-warning-subtle text-warning-emphasis'
+  if (status === 'reviewed') return 'bg-primary-subtle text-primary-emphasis'
+  return 'bg-secondary-subtle text-secondary-emphasis'
+}
+
+function canReanalyzeReport(item: RecentReport) {
+  return item.can_reanalyze === true && !!item.run_id && ['draft', 'review_pending', 'reviewed'].includes(item.status)
+}
+
+function activeJobFor(item: PendingRun) {
+  return item.active_job ?? null
+}
+
+function isGenerating(item: PendingRun) {
+  return !!activeJobFor(item) || analyzingId.value === item.run_id
+}
+
+function generationProgressFor(item: PendingRun): number {
+  const active = activeJobFor(item)
+  if (active) return active.progress
+  if (analyzingId.value === item.run_id) return analysisProgress.value[item.run_id] ?? 0
+  return 0
+}
+
+function reportChecksText(item: RecentReport) {
+  if (item.status === 'published') return '发布时已通过审核'
+  if (item.status === 'archived') return '已归档，不再处理'
+  const issues: string[] = []
+  if (!['eligible', 'included', 'included_override'].includes(item.quality_status)) issues.push('数据质量待处理')
+  if (item.requires_review_count) issues.push(`有效对话待分类 ${item.requires_review_count} 条`)
+  if (item.double_review_pending == null) issues.push('尚未建立双人盲编批次')
+  else if (item.double_review_pending > 0) issues.push(`盲编待完成 ${item.double_review_pending} 条`)
+  return issues.join('；') || '进入草稿核对 AI 来源、数据版本与发布条件'
+}
+
+function toggleReportSelection() {
+  selectedReports.value = allReportsSelected.value ? [] : selectableReports.value.map(item => item.id)
+}
+
+async function reanalyzeReports(single?: RecentReport) {
+  if (reportActionsBusy.value || dashboardLoading.value || dashboardError.value) return
+  const items = single ? [single].filter(canReanalyzeReport) : selectableReports.value.filter(item => selectedReports.value.includes(item.id))
+  if (!items.length) return
+  const confirmed = await confirmAction({
+    title: single ? '重新 AI 分析草稿' : `批量重新 AI 分析 ${items.length} 份草稿`,
+    message: `将按当前报告提示词，依据已有转录、编码及复核结果重新生成${single ? '这份' : '本页所选'}草稿的画像和建议。不会修改原始数据或人工编码；成功后替换原草稿并更新生成时间，需重新审阅，不会自动发布。失败时保留原稿。批量任务逐份执行，请保持页面打开。`,
+    confirmText: '确认重新分析', tone: 'primary'
+  })
+  if (!confirmed || reportActionsBusy.value) return
+  refreshingReports.value = true
+  stopReportRefresh.value = false
+  reportRefreshProgress.value = { completed: 0, total: items.length }
+  reportRefreshResults.value = []
+  try {
+    for (const item of items) {
+      if (stopReportRefresh.value) break
+      refreshingReportId.value = item.id
+      try {
+        const result = (await researchApi.startAnalysis(item.run_id, false, {
+          report_only: true, expected_generated_at: item.generated_at
+        })).data
+        if (result.status !== 'completed') throw new Error(result.error_message || 'AI 分析未完成，原草稿已保留')
+        reportRefreshResults.value.push({ id: item.id, name: `${item.user_name}（${item.username}）`, success: true, message: '已更新草稿，请重新审阅' })
+        selectedReports.value = selectedReports.value.filter(id => id !== item.id)
+      } catch (error) {
+        reportRefreshResults.value.push({ id: item.id, name: `${item.user_name}（${item.username}）`, success: false, message: error instanceof Error ? error.message : '请求失败，请刷新核对报告状态后重试' })
+      } finally {
+        reportRefreshProgress.value.completed++
+      }
+    }
+    const success = reportRefreshResults.value.filter(item => item.success).length
+    const failed = reportRefreshResults.value.length - success
+    const skipped = items.length - reportRefreshResults.value.length
+    notify(`重新 AI 分析结束：成功 ${success} 份，失败 ${failed} 份${skipped ? `，未执行 ${skipped} 份` : ''}。`, failed || skipped ? 'warning' : 'success')
+    // Regenerated reports move to the top; fetch only this dashboard, not all analytics.
+    await loadDashboardPage()
+  } finally {
+    refreshingReportId.value = ''
+    refreshingReports.value = false
+  }
 }
 
 const dimensionLabels: Record<string, string> = {
@@ -147,13 +237,13 @@ async function loadPage() {
   // 2C4G 云端首次聚合可能需要数秒；3 秒会把正常慢查询误判为失败。
   const analyticsTimeout = window.setTimeout(() => analyticsController.abort(), 15000)
   const requests = await Promise.allSettled([
-      researchApi.dashboard(),
+      loadDashboardPage(),
       researchApi.analytics({ signal: analyticsController.signal }),
-      researchApi.taskOrderAssignments({ page: taskOrderPage.value, page_size: taskOrderPageSize.value, search: taskOrderSearch.value.trim() }),
+      loadTaskOrderPage(),
       asrApi.reviewQueue(),
       researchApi.listCodingUnitAssignments(),
       researchApi.listCodingUnitDisagreements(),
-      researchApi.listRunQuality({ page: qualityPage.value, page_size: qualityPageSize.value, search: qualitySearch.value.trim(), status_filter: qualityFilter.value })
+      loadQualityPage()
     ])
   window.clearTimeout(analyticsTimeout)
   const labels = ['研究概览', '统计指标', '任务顺序', '转录队列', '盲编待办', '仲裁待办', '数据质量']
@@ -161,9 +251,7 @@ async function loadPage() {
     if (result.status === 'rejected') sectionErrors.value.push(labels[index] ?? `分区 ${index + 1}`)
   })
   try {
-    if (requests[0]?.status === 'fulfilled') dashboard.value = requests[0].value.data
     if (requests[1]?.status === 'fulfilled') analytics.value = requests[1].value.data
-    if (requests[2]?.status === 'fulfilled') taskOrders.value = requests[2].value.data
     if (requests[3]?.status === 'fulfilled') {
       transcriptAttention.value = requests[3].value.data.filter(item =>
         ['failed', 'retry_wait', 'waiting_configuration'].includes(item.job.status)
@@ -171,59 +259,87 @@ async function loadPage() {
     }
     if (requests[4]?.status === 'fulfilled') codingAssignments.value = requests[4].value.data.length
     if (requests[5]?.status === 'fulfilled') codingDisagreements.value = requests[5].value.data.length
-    if (requests[6]?.status === 'fulfilled') {
-      qualityRuns.value = requests[6].value.data
-      qualityTotal.value = Number(requests[6].value.headers['x-total-count'] ?? requests[6].value.data.length)
-    }
-    selectedStudents.value = selectedStudents.value.filter(id =>
-      taskOrders.value?.students.some(student => student.user_id === id)
-    )
   } finally {
     isLoading.value = false
   }
 }
 
 async function loadQualityPage() {
-  try {
-    const response = await researchApi.listRunQuality({
+  await requestQuality(() => researchApi.listRunQuality({
       page: qualityPage.value,
       page_size: qualityPageSize.value,
       search: qualitySearch.value.trim(),
       status_filter: qualityFilter.value
-    })
+    }), response => {
     qualityRuns.value = response.data
     qualityTotal.value = Number(response.headers['x-total-count'] ?? response.data.length)
-  } catch (error) {
-    notify(error instanceof Error ? error.message : '数据质量列表加载失败', 'danger')
-  }
+    const last = Math.max(1, Math.ceil(qualityTotal.value / qualityPageSize.value))
+    if (qualityPage.value > last) qualityPage.value = last
+  })
 }
 
 async function loadTaskOrderPage() {
-  try {
-    taskOrders.value = (await researchApi.taskOrderAssignments({
+  await requestOrders(() => researchApi.taskOrderAssignments({
       page: taskOrderPage.value,
       page_size: taskOrderPageSize.value,
       search: taskOrderSearch.value.trim()
-    })).data
-  } catch (error) {
-    notify(error instanceof Error ? error.message : '任务顺序列表加载失败', 'danger')
-  }
+    }), response => {
+    taskOrders.value = response.data
+    selectedStudents.value = selectedStudents.value.filter(id => response.data.students.some(student => student.user_id === id))
+    const last = Math.max(1, Math.ceil(response.data.total / taskOrderPageSize.value))
+    if (taskOrderPage.value > last) taskOrderPage.value = last
+  })
+}
+
+async function loadDashboardPage() {
+  await requestDashboard(() => researchApi.dashboard({
+    reports_page: reportsPage.value, reports_page_size: reportsPageSize.value,
+    pending_page: pendingPage.value, pending_page_size: pendingPageSize.value
+  }), response => {
+    dashboard.value = response.data
+    selectedReports.value = selectedReports.value.filter(id => response.data.recent_reports.some(item => item.id === id && canReanalyzeReport(item)))
+    syncingDashboardPages = true
+    reportsPage.value = response.data.reports_page
+    pendingPage.value = response.data.pending_page
+    syncingDashboardPages = false
+  })
 }
 
 let qualityFilterTimer: ReturnType<typeof setTimeout> | null = null
 let taskOrderFilterTimer: ReturnType<typeof setTimeout> | null = null
 watch([qualitySearch, qualityFilter, qualityPageSize], () => {
   qualityPage.value = 1
+}, { flush: 'sync' })
+watch([qualitySearch, qualityFilter, qualityPageSize, qualityPage], () => {
+  invalidateQuality()
   if (qualityFilterTimer) clearTimeout(qualityFilterTimer)
   qualityFilterTimer = setTimeout(() => void loadQualityPage(), 300)
 })
-watch(qualityPage, () => void loadQualityPage())
 watch([taskOrderSearch, taskOrderPageSize], () => {
   taskOrderPage.value = 1
+}, { flush: 'sync' })
+watch([taskOrderSearch, taskOrderPageSize, taskOrderPage], () => {
+  invalidateOrders()
+  selectedStudents.value = []
   if (taskOrderFilterTimer) clearTimeout(taskOrderFilterTimer)
   taskOrderFilterTimer = setTimeout(() => void loadTaskOrderPage(), 300)
 })
-watch(taskOrderPage, () => void loadTaskOrderPage())
+watch(reportsPageSize, () => { reportsPage.value = 1 }, { flush: 'sync' })
+watch(pendingPageSize, () => { pendingPage.value = 1 }, { flush: 'sync' })
+watch([reportsPage, reportsPageSize], () => { selectedReports.value = [] }, { flush: 'sync' })
+let dashboardPageTimer: ReturnType<typeof setTimeout> | null = null
+watch([reportsPage, reportsPageSize, pendingPage, pendingPageSize], () => {
+  if (syncingDashboardPages) return
+  invalidateDashboard()
+  if (dashboardPageTimer) clearTimeout(dashboardPageTimer)
+  dashboardPageTimer = setTimeout(() => void loadDashboardPage(), 0)
+}, { flush: 'sync' })
+onUnmounted(() => {
+  stopReportRefresh.value = true
+  if (qualityFilterTimer) clearTimeout(qualityFilterTimer)
+  if (taskOrderFilterTimer) clearTimeout(taskOrderFilterTimer)
+  if (dashboardPageTimer) clearTimeout(dashboardPageTimer)
+})
 
 function qualityStatusLabel(status: string) {
   return ({
@@ -270,29 +386,6 @@ async function saveQualityDecision() {
   }
 }
 
-async function bulkPublish() {
-  if (!selectedReportIds.value.length) return
-  const confirmed = await confirmAction({
-    title: '批量发布报告',
-    message: `将 ${selectedReportIds.value.length} 份已完成复核的报告发布给学生，是否继续？`,
-    confirmText: '确认发布',
-    tone: 'success'
-  })
-  if (!confirmed) return
-  bulkPublishing.value = true
-  try {
-    const result = (await researchApi.bulkPublishReports(selectedReportIds.value, '后台批量确认发布')).data
-    notify(`已发布 ${result.processed} 份报告${result.skipped ? `，跳过 ${result.skipped} 份` : ''}`, result.skipped ? 'warning' : 'success')
-    if (result.errors.length) errorMessage.value = result.errors.slice(0, 5).join('；')
-    selectedReportIds.value = []
-    await loadPage()
-  } catch (error) {
-    notify(error instanceof Error ? error.message : '批量发布失败', 'danger')
-  } finally {
-    bulkPublishing.value = false
-  }
-}
-
 function orderedIds(code: 'AB' | 'BA') {
   const ids = taskOrders.value?.tasks.map(task => task.id) ?? []
   return code === 'AB' ? ids : [...ids].reverse()
@@ -330,12 +423,13 @@ function onOrderChange(student: TaskOrderStudent, event: Event) {
 
 async function balanceSelected() {
   if (!selectedStudents.value.length) return
+  const studentIds = [...selectedStudents.value]
   balancing.value = true
   errorMessage.value = ''
   try {
-    await researchApi.balanceTaskOrders(selectedStudents.value)
+    await researchApi.balanceTaskOrders(studentIds)
     await loadTaskOrderPage()
-    successMessage.value = `已为 ${selectedStudents.value.length} 名学生完成 AB/BA 平衡分配。`
+    successMessage.value = `已为 ${studentIds.length} 名学生完成 AB/BA 平衡分配。`
     selectedStudents.value = []
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '平衡分配失败'
@@ -344,35 +438,26 @@ async function balanceSelected() {
   }
 }
 
-async function publish(reportId: string) {
-  publishingId.value = reportId
-  errorMessage.value = ''
-  try {
-    await researchApi.publishReport(reportId, '教师端确认发布')
-    successMessage.value = '报告已发布给学生。'
-    await loadPage()
-  } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : '发布失败'
-  } finally {
-    publishingId.value = ''
-  }
-}
-
 async function analyze(runId: string) {
+  if (reportActionsBusy.value) return
+  generatedDraftRunId.value = ''
   analyzingId.value = runId
   analysisErrorMsg.value = ''
   errorMessage.value = ''
   successMessage.value = ''
   try {
-    const response = await researchApi.startAnalysis(runId)
+    const response = await researchApi.startAnalysis(runId, false, undefined, (job) => {
+      analysisProgress.value = { ...analysisProgress.value, [runId]: job.progress }
+    })
     if (response.data.status !== 'completed') {
-      const err = response.data.error_message || '多模态分析未能完成，请检查模型服务或转录片段'
+      const err = response.data.error_message || '报告生成未完成，请检查模型服务与转录数据'
       analysisErrorMsg.value = err
       notify(`测评分析失败：${err}`, 'danger')
       throw new Error(err)
     }
     notify('测评分析完成，已生成元认知画像报告草稿！', 'success')
     successMessage.value = '测评分析完成，报告草稿已生成。'
+    generatedDraftRunId.value = runId
     await loadPage()
   } catch (error) {
     const msg = error instanceof Error ? error.message : '分析任务失败'
@@ -381,29 +466,34 @@ async function analyze(runId: string) {
     notify(msg, 'danger')
   } finally {
     analyzingId.value = ''
+    delete analysisProgress.value[runId]
   }
 }
 
 async function batchAnalyzeAll() {
-  const pendingList = dashboard.value?.unanalyzed_runs ?? []
-  if (!pendingList.length || batchAnalyzing.value) return
+  const pendingList = [...(dashboard.value?.unanalyzed_runs ?? [])]
+  if (!pendingList.length || reportActionsBusy.value || dashboardLoading.value || dashboardError.value) return
   const confirmed = await confirmAction({
     title: `批量生成 ${pendingList.length} 份报告`,
-    message: `将依次对所选 ${pendingList.length} 份完整测评运行多模态分析引擎生成报告草稿，是否继续？`,
+    message: `仅处理当前第 ${pendingPage.value} 页的 ${pendingList.length} 份完整测评，其他页不会生成。将依据转录、编码及问卷数据逐份生成报告草稿，是否继续？`,
     confirmText: '开始批量生成',
     tone: 'primary'
   })
-  if (!confirmed) return
+  if (!confirmed || reportActionsBusy.value) return
   batchAnalyzing.value = true
+  stopReportRefresh.value = false
   batchAnalyzeProgress.value = { current: 0, total: pendingList.length }
   analysisErrorMsg.value = ''
   let successCount = 0
   let failCount = 0
   for (const item of pendingList) {
+    if (stopReportRefresh.value) break
     batchAnalyzeProgress.value.current++
     analyzingId.value = item.run_id
     try {
-      const response = await researchApi.startAnalysis(item.run_id)
+      const response = await researchApi.startAnalysis(item.run_id, false, undefined, (job) => {
+        analysisProgress.value = { ...analysisProgress.value, [item.run_id]: job.progress }
+      })
       if (response.data.status === 'completed') {
         successCount++
       } else {
@@ -411,6 +501,8 @@ async function batchAnalyzeAll() {
       }
     } catch {
       failCount++
+    } finally {
+      delete analysisProgress.value[item.run_id]
     }
   }
   analyzingId.value = ''
@@ -617,7 +709,9 @@ onMounted(loadPage)
       <span><i class="bi bi-exclamation-triangle me-2" />{{ sectionErrors.join('、') }}暂时加载失败，其他分区仍可正常使用。</span>
       <button class="btn btn-sm btn-outline-warning flex-shrink-0" type="button" @click="loadPage">重试</button>
     </div>
-    <div v-if="successMessage" class="alert alert-success">{{ successMessage }}</div>
+    <div v-if="successMessage" class="alert alert-success d-flex flex-wrap align-items-center gap-2">{{ successMessage }}<RouterLink v-if="generatedDraftRunId" :to="{ path: '/report-review', query: { run: generatedDraftRunId } }" class="btn btn-sm btn-outline-success">查看新生成草稿</RouterLink></div>
+    <div v-if="dashboardError" class="alert alert-danger" role="alert">报告列表加载失败：{{ dashboardError }} <button type="button" class="btn btn-sm btn-outline-danger" @click="loadDashboardPage">重试</button></div>
+    <div v-if="ordersError && !taskOrders" class="alert alert-danger" role="alert">任务顺序加载失败：{{ ordersError }} <button type="button" class="btn btn-sm btn-outline-danger" @click="loadTaskOrderPage">重试</button></div>
 
     <div v-if="isLoading" class="card border-0 shadow-sm">
       <div class="card-body py-5 text-center"><div class="spinner-border text-primary" /></div>
@@ -632,7 +726,7 @@ onMounted(loadPage)
           <div class="metric-card"><span>待复核编码</span><strong>{{ dashboard.review_pending }}</strong></div>
         </div>
         <div class="col-6 col-xl-3">
-          <div class="metric-card"><span>可发布报告</span><strong>{{ dashboard.publishable }}</strong></div>
+          <div class="metric-card"><span>待审阅草稿</span><strong>{{ dashboard.publishable }}</strong></div>
         </div>
         <div class="col-6 col-xl-3">
           <div class="metric-card"><span>已发布报告</span><strong>{{ dashboard.published }}</strong></div>
@@ -649,8 +743,8 @@ onMounted(loadPage)
         <RouterLink to="/review" class="work-item" :class="{ urgent: codingDisagreements }">
           <i class="bi bi-intersect" /><span><strong>{{ codingDisagreements }}</strong><small>待仲裁分歧</small></span><i class="bi bi-chevron-right" />
         </RouterLink>
-        <a href="#pending-analysis" class="work-item" :class="{ urgent: dashboard.unanalyzed_runs.length }">
-          <i class="bi bi-file-earmark-bar-graph" /><span><strong>{{ dashboard.unanalyzed_runs.length }}</strong><small>待生成报告</small></span><i class="bi bi-chevron-right" />
+        <a href="#pending-analysis" class="work-item" :class="{ urgent: dashboard.unanalyzed_total }">
+          <i class="bi bi-file-earmark-bar-graph" /><span><strong>{{ dashboard.unanalyzed_total }}</strong><small>待生成报告</small></span><i class="bi bi-chevron-right" />
         </a>
       </div>
 
@@ -678,10 +772,12 @@ onMounted(loadPage)
             </select>
           </div>
           <div class="table-responsive quality-table-wrap mt-3">
-            <table class="table align-middle mb-0 mobile-card-table quality-mobile-table">
+            <p v-if="qualityLoading" role="status" class="text-muted py-3">正在加载数据质量记录…</p>
+            <div v-else-if="qualityError" class="alert alert-danger" role="alert">{{ qualityError }} <button class="btn btn-sm btn-outline-danger" @click="loadQualityPage">重试</button></div>
+            <table v-else class="table align-middle mb-0 mobile-card-table quality-mobile-table">
               <thead><tr><th>学生</th><th>自动检查</th><th>研究状态</th><th>问题定位</th><th class="text-end">决策</th></tr></thead>
               <tbody>
-                <tr v-for="item in filteredQualityRuns" :key="item.run_id">
+                <tr v-for="item in qualityRuns" :key="item.run_id">
                   <td data-label="学生"><strong>{{ item.name }}</strong><small class="d-block text-muted">{{ item.username }} · {{ item.class_group || '未分班' }}</small></td>
                   <td data-label="自动检查"><span class="badge" :class="item.automatic_status === 'passed' ? 'bg-success-subtle text-success-emphasis' : item.automatic_status === 'warning' ? 'bg-warning-subtle text-warning-emphasis' : 'bg-danger-subtle text-danger-emphasis'">{{ item.automatic_status === 'passed' ? '通过' : item.automatic_status === 'warning' ? '有警告' : '未通过' }}</span></td>
                   <td data-label="研究状态"><span class="badge" :class="qualityStatusClass(item.effective_status)">{{ qualityStatusLabel(item.effective_status) }}</span><small v-if="item.reviewed_by_name" class="d-block text-muted mt-1">{{ item.reviewed_by_name }}</small></td>
@@ -697,15 +793,11 @@ onMounted(loadPage)
                     </div>
                   </td>
                 </tr>
-                <tr v-if="!filteredQualityRuns.length"><td colspan="5" class="text-center text-muted py-4">没有符合当前条件的测评</td></tr>
+                <tr v-if="!qualityRuns.length"><td colspan="5" class="text-center text-muted py-4">没有符合当前条件的测评</td></tr>
               </tbody>
             </table>
           </div>
-          <nav v-if="qualityTotal > qualityPageSize" class="section-pagination mt-3" aria-label="数据质量分页">
-            <button class="btn btn-sm btn-outline-secondary" :disabled="qualityPage <= 1" @click="qualityPage--">上一页</button>
-            <span>{{ qualityPage }} / {{ qualityPageCount }} · 共 {{ qualityTotal }} 次测评</span>
-            <button class="btn btn-sm btn-outline-secondary" :disabled="qualityPage >= qualityPageCount" @click="qualityPage++">下一页</button>
-          </nav>
+          <SectionPagination v-model:page="qualityPage" v-model:page-size="qualityPageSize" :total="qualityTotal" :disabled="qualityLoading || qualitySaving" label="数据质量" />
         </div>
       </section>
 
@@ -720,11 +812,11 @@ onMounted(loadPage)
             </div>
             <button
               class="btn btn-primary btn-sm"
-              :disabled="!selectedStudents.length || balancing"
+              :disabled="!selectedStudents.length || balancing || ordersLoading || !!ordersError"
               @click="balanceSelected"
             >
               <span v-if="balancing" class="spinner-border spinner-border-sm me-1" />
-              平衡分配所选（{{ selectedStudents.length }}）
+              平衡分配本页所选（{{ selectedStudents.length }}）
             </button>
           </div>
           <div class="order-legend mb-3">
@@ -733,12 +825,12 @@ onMounted(loadPage)
           </div>
           <div class="order-search mb-3">
             <input v-model="taskOrderSearch" class="form-control form-control-sm" type="search" placeholder="查找姓名、账号或班级" />
-            <select v-model.number="taskOrderPageSize" class="form-select form-select-sm" aria-label="任务顺序每页数量">
-              <option :value="20">20 / 页</option><option :value="50">50 / 页</option><option :value="100">100 / 页</option>
-            </select>
+            <span class="text-muted small">翻页或筛选后清空本页勾选</span>
           </div>
           <div class="table-responsive">
-            <table class="table align-middle mb-0 mobile-card-table order-mobile-table">
+            <p v-if="ordersLoading" role="status" class="text-muted py-3">正在加载任务顺序…</p>
+            <div v-else-if="ordersError" class="alert alert-danger" role="alert">{{ ordersError }} <button class="btn btn-sm btn-outline-danger" @click="loadTaskOrderPage">重试</button></div>
+            <table v-else class="table align-middle mb-0 mobile-card-table order-mobile-table">
               <thead>
                 <tr><th class="selection-cell"></th><th>学生</th><th>班级</th><th>当前分配</th><th>生效说明</th></tr>
               </thead>
@@ -781,74 +873,69 @@ onMounted(loadPage)
               </tbody>
             </table>
           </div>
-          <nav v-if="(taskOrders.total ?? 0) > taskOrderPageSize" class="section-pagination mt-3" aria-label="任务顺序分页">
-            <button class="btn btn-sm btn-outline-secondary" :disabled="taskOrderPage <= 1" @click="taskOrderPage--">上一页</button>
-            <span>{{ taskOrderPage }} / {{ taskOrderPageCount }} · 共 {{ taskOrders.total }} 名学生</span>
-            <button class="btn btn-sm btn-outline-secondary" :disabled="taskOrderPage >= taskOrderPageCount" @click="taskOrderPage++">下一页</button>
-          </nav>
+          <SectionPagination v-model:page="taskOrderPage" v-model:page-size="taskOrderPageSize" :total="taskOrders.total" :disabled="ordersLoading || balancing || !!assigningId" label="任务顺序" />
         </div>
       </div>
 
       <div class="row g-4 mt-1">
-        <div v-if="dashboard" class="col-lg-7">
+        <div v-if="dashboard" class="col-12">
           <div class="card border-0 shadow-sm h-100">
             <div class="card-body p-4">
-              <div class="d-flex justify-content-between align-items-center mb-3">
+              <div class="d-flex flex-wrap gap-3 justify-content-between align-items-center mb-3">
                 <div>
                   <h5 class="mb-1">最近报告</h5>
-                  <small class="text-muted">低置信度或编码分歧清零后才能发布。</small>
+                  <small class="text-muted">按报告最近生成时间倒序排列。未发布草稿可重新 AI 分析；成功后更新生成时间，并需重新审阅。</small>
                 </div>
-                <div class="d-flex gap-2">
-                  <button v-if="selectedReportIds.length" class="btn btn-sm btn-success" :disabled="bulkPublishing" @click="bulkPublish">
-                    <span v-if="bulkPublishing" class="spinner-border spinner-border-sm me-1" />批量发布（{{ selectedReportIds.length }}）
-                  </button>
-                  <RouterLink to="/transcripts" class="btn btn-sm btn-outline-secondary">转录校订</RouterLink>
-                  <RouterLink to="/review" class="btn btn-sm btn-outline-primary">进入双人复核</RouterLink>
+                <div class="d-flex flex-wrap gap-2">
+                  <button type="button" class="btn btn-sm btn-outline-secondary" :disabled="reportActionsBusy || dashboardLoading" @click="loadDashboardPage">刷新列表</button>
+                  <button type="button" class="btn btn-sm btn-primary" :disabled="reportActionsBusy || dashboardLoading || !!dashboardError || !selectedReports.length" @click="reanalyzeReports()">重新 AI 分析所选（{{ selectedReports.length }}）</button>
                 </div>
               </div>
+              <p class="small text-muted">勾选仅作用于当前页，翻页后清空选择。报告审阅与发布请进入“查看草稿”；已发布和已归档报告不参与重新分析。</p>
+              <ReportGenerationJobs @completed="loadDashboardPage" />
+              <div v-if="refreshingReports" class="alert alert-info" role="status" aria-live="polite">
+                <span class="spinner-border spinner-border-sm me-2" />已处理 {{ reportRefreshProgress.completed }} / {{ reportRefreshProgress.total }} 份，当前报告正在 AI 分析，请保持页面打开。
+                <button type="button" class="btn btn-sm btn-outline-secondary ms-2" :disabled="stopReportRefresh" @click="stopReportRefresh = true">{{ stopReportRefresh ? '当前报告完成后停止' : '停止后续任务' }}</button>
+              </div>
+              <details v-if="reportRefreshResults.length" class="mb-3" open>
+                <summary>本次处理结果：成功 {{ reportRefreshResults.filter(item => item.success).length }} 份，失败 {{ reportRefreshResults.filter(item => !item.success).length }} 份</summary>
+                <ul class="small mt-2 mb-0 report-refresh-results"><li v-for="result in reportRefreshResults" :key="result.id" :class="result.success ? 'text-success' : 'text-danger'">{{ result.name }}：{{ result.message }}</li></ul>
+              </details>
+              <div v-if="dashboardError" class="alert alert-danger" role="alert">{{ dashboardError }} <button type="button" class="btn btn-sm btn-outline-danger" :disabled="reportActionsBusy || dashboardLoading" @click="loadDashboardPage">重试加载</button></div>
               <div class="table-responsive">
-                <table class="table align-middle mobile-card-table report-mobile-table">
-                  <thead><tr><th class="selection-cell"></th><th>学生姓名</th><th>账号</th><th>得分</th><th>状态</th><th>待复核/双评</th><th /></tr></thead>
+                <p v-if="dashboardLoading" role="status" class="text-muted py-3">正在加载报告…</p>
+                <table v-else-if="!dashboardError" class="table align-middle mobile-card-table report-mobile-table">
+                  <thead><tr>
+                    <th><input type="checkbox" class="form-check-input" aria-label="选择本页全部可重新分析的草稿" :checked="allReportsSelected" :indeterminate="selectedReports.length > 0 && !allReportsSelected" :disabled="reportActionsBusy || !selectableReports.length" @change="toggleReportSelection"></th>
+                    <th>学生信息</th><th>生成时间 ↓</th><th>报告状态</th><th>发布检查</th><th class="text-end">操作</th>
+                  </tr></thead>
                   <tbody>
                     <tr v-for="item in dashboard.recent_reports" :key="item.id">
-                      <td data-label="选择"><input v-if="item.status !== 'published' && item.requires_review_count === 0 && item.double_review_pending === 0 && ['eligible', 'included', 'included_override'].includes(item.quality_status)" v-model="selectedReportIds" class="form-check-input" type="checkbox" :value="item.id" :aria-label="`选择报告 ${item.id}`" /></td>
-                      <td data-label="学生姓名"><strong>{{ item.user_name }}</strong></td>
-                      <td class="font-monospace" data-label="账号">{{ item.username || item.user_id.slice(0, 8) }}</td>
-                      <td data-label="得分">{{ item.score.toFixed(1) }}</td>
-                      <td data-label="状态"><span class="badge bg-light text-dark">{{ reportStatusLabel(item.status) }}</span></td>
-                      <td data-label="待复核 / 双评">{{ item.requires_review_count }} / {{ item.double_review_pending === null ? '未建批次' : item.double_review_pending }}</td>
+                      <td data-label="选择"><input v-if="canReanalyzeReport(item)" v-model="selectedReports" type="checkbox" class="form-check-input" :value="item.id" :aria-label="`选择 ${item.user_name} 的报告草稿`" :disabled="reportActionsBusy"><span v-else class="text-muted">—</span></td>
+                      <td data-label="学生信息"><strong>{{ item.user_name }}</strong><small class="d-block text-muted font-monospace">{{ item.username || '账号未提供' }}</small></td>
+                      <td data-label="生成时间"><span>{{ exportTime(item.generated_at) }}</span><small class="d-block text-muted">报告版本 V{{ item.version_no }}</small></td>
+                      <td data-label="报告状态"><span class="badge" :class="refreshingReportId === item.id ? 'bg-info-subtle text-info-emphasis' : reportStatusClass(item.status)">{{ refreshingReportId === item.id ? '正在重新 AI 分析' : reportStatusLabel(item.status) }}</span></td>
+                      <td data-label="发布检查" class="report-checks-cell"><small>{{ reportChecksText(item) }}</small></td>
                       <td class="text-end" data-label="操作">
-                        <button
-                          v-if="item.status !== 'published'"
-                          class="btn btn-sm btn-success"
-                          :disabled="item.requires_review_count > 0 || item.double_review_pending === null || item.double_review_pending > 0 || !['eligible', 'included', 'included_override'].includes(item.quality_status) || publishingId === item.id"
-                          @click="publish(item.id)"
-                        >
-                          发布
-                        </button>
-                        <div v-else class="d-inline-flex align-items-center gap-1 justify-content-end">
-                          <span class="text-success small me-1"><i class="bi bi-check-circle" /> 已发布</span>
-                          <RouterLink
-                            :to="'/report?run=' + item.run_id"
-                            class="btn btn-sm btn-outline-primary py-0 px-2"
-                            title="查看并导出该学生的 PDF 画像报告"
-                          >
-                            <i class="bi bi-file-earmark-pdf me-1" />PDF
-                          </RouterLink>
+                        <div class="d-flex flex-wrap justify-content-end gap-2">
+                          <RouterLink v-if="!refreshingReports" :to="{ path: '/report-review', query: { id: item.id } }" class="btn btn-sm btn-outline-primary">{{ ['published', 'archived'].includes(item.status) ? '查看报告' : '查看草稿' }}</RouterLink>
+                          <button v-else type="button" class="btn btn-sm btn-outline-secondary" disabled>等待本次处理完成</button>
+                          <button v-if="canReanalyzeReport(item)" type="button" class="btn btn-sm btn-outline-primary" :disabled="reportActionsBusy" @click="reanalyzeReports(item)"><span v-if="refreshingReportId === item.id" class="spinner-border spinner-border-sm me-1" />重新 AI 分析</button>
                         </div>
                       </td>
                     </tr>
                     <tr v-if="!dashboard.recent_reports.length">
-                      <td colspan="7" class="text-center text-muted py-4">暂无报告</td>
+                      <td colspan="6" class="text-center text-muted py-4">暂无报告</td>
                     </tr>
                   </tbody>
                 </table>
               </div>
+              <SectionPagination v-model:page="reportsPage" v-model:page-size="reportsPageSize" :total="dashboard.reports" :disabled="dashboardLoading || reportActionsBusy" label="最近报告" />
             </div>
           </div>
         </div>
 
-        <div v-if="analytics" class="col-lg-5">
+        <div v-if="analytics" class="col-12">
           <div class="card border-0 shadow-sm h-100">
             <div class="card-body p-4">
               <h5>基础研究指标</h5>
@@ -899,24 +986,24 @@ onMounted(loadPage)
         </div>
       </div>
 
-      <div id="pending-analysis" v-if="dashboard?.unanalyzed_runs.length" class="card border-0 shadow-sm mt-4 pending-analysis-card">
+      <div id="pending-analysis" v-if="dashboard" class="card border-0 shadow-sm mt-4 pending-analysis-card">
         <div class="card-body p-4">
           <div class="d-flex flex-wrap justify-content-between align-items-center gap-3 mb-3">
             <div>
               <div class="d-flex align-items-center gap-2">
                 <span class="badge bg-warning-subtle text-warning-emphasis">待处理</span>
-                <h5 class="mb-0">待生成报告的完整测评（共 {{ dashboard.unanalyzed_runs.length }} 份）</h5>
+                <h5 class="mb-0">待生成报告的完整测评（共 {{ dashboard.unanalyzed_total }} 份）</h5>
               </div>
-              <p class="text-muted small mb-0 mt-1">学生已完成出声思维作答并通过质量核验；点击“开始多模态分析”将提取行为证据并生成画像报告草稿。</p>
+              <p class="text-muted small mb-0 mt-1">学生已完成作答并通过质量核验；点击“生成报告草稿”将依据转录、编码及问卷数据生成报告，不会自动发布。</p>
             </div>
             <button
               class="btn btn-sm btn-primary"
-              :disabled="batchAnalyzing || Boolean(analyzingId)"
+              :disabled="reportActionsBusy || dashboardLoading || !!dashboardError || !dashboard.unanalyzed_runs.length"
               @click="batchAnalyzeAll"
             >
               <span v-if="batchAnalyzing" class="spinner-border spinner-border-sm me-1" />
               <i v-else class="bi bi-play-circle me-1" />
-              {{ batchAnalyzing ? `正在批量分析 (${batchAnalyzeProgress.current}/${batchAnalyzeProgress.total})…` : '一键批量生成全部报告' }}
+              {{ batchAnalyzing ? `正在批量分析 (${batchAnalyzeProgress.current}/${batchAnalyzeProgress.total})…` : `生成本页 ${dashboard.unanalyzed_runs.length} 份报告` }}
             </button>
           </div>
 
@@ -929,7 +1016,8 @@ onMounted(loadPage)
           </div>
 
           <div class="table-responsive">
-            <table class="table align-middle mb-0 mobile-card-table">
+            <p v-if="dashboardLoading" role="status" class="text-muted py-3">正在加载待生成记录…</p>
+            <table v-else-if="!dashboardError" class="table align-middle mb-0 mobile-card-table">
               <thead>
                 <tr>
                   <th>学生信息</th>
@@ -939,6 +1027,7 @@ onMounted(loadPage)
                 </tr>
               </thead>
               <tbody>
+                <tr v-if="!dashboard.unanalyzed_runs.length"><td colspan="4" class="text-center text-muted py-4">暂无待生成报告的完整测评</td></tr>
                 <tr v-for="item in dashboard.unanalyzed_runs" :key="item.run_id">
                   <td data-label="学生信息">
                     <div class="d-flex align-items-center gap-2">
@@ -963,18 +1052,31 @@ onMounted(loadPage)
                   <td class="text-end" data-label="操作">
                     <button
                       class="btn btn-sm btn-outline-primary"
-                      :disabled="analyzingId === item.run_id || batchAnalyzing"
+                      :disabled="reportActionsBusy || isGenerating(item)"
                       @click="analyze(item.run_id)"
                     >
-                      <span v-if="analyzingId === item.run_id" class="spinner-border spinner-border-sm me-1" />
+                      <span v-if="isGenerating(item)" class="spinner-border spinner-border-sm me-1" />
                       <i v-else class="bi bi-cpu me-1" />
-                      {{ analyzingId === item.run_id ? '正在分析计算…' : '开始多模态分析' }}
+                      {{ isGenerating(item) ? `生成中 ${generationProgressFor(item)}%` : '生成报告草稿' }}
                     </button>
+                    <div v-if="isGenerating(item)" class="mt-2 text-start">
+                      <progress
+                        :value="generationProgressFor(item)"
+                        max="100"
+                        class="w-100"
+                        :aria-label="`报告生成进度 ${generationProgressFor(item)}%`"
+                      />
+                      <small class="text-muted d-block mt-1">
+                        {{ activeJobFor(item)?.status === 'queued' ? '排队中' : 'AI 生成中' }}
+                        <span v-if="activeJobFor(item)?.error_message"> · {{ activeJobFor(item)?.error_message }}</span>
+                      </small>
+                    </div>
                   </td>
                 </tr>
               </tbody>
             </table>
           </div>
+          <SectionPagination v-model:page="pendingPage" v-model:page-size="pendingPageSize" :total="dashboard.unanalyzed_total" :disabled="dashboardLoading || batchAnalyzing || !!analyzingId" label="待生成报告" />
         </div>
       </div>
     </template>
@@ -1117,6 +1219,10 @@ onMounted(loadPage)
 </template>
 
 <style scoped>
+.report-checks-cell { max-width: 25rem; white-space: normal; overflow-wrap: anywhere; }
+.report-mobile-table .badge { white-space: normal; line-height: 1.5; text-align: center; }
+.report-mobile-table td { overflow-wrap: anywhere; }
+.report-refresh-results { max-height: 12rem; overflow-y: auto; overflow-wrap: anywhere; }
 .teacher-page { max-width: 1240px; margin: 0 auto; }
 .metric-table { font-size: .78rem; }
 .metric-table th { color: var(--color-text-muted); font-weight: 600; white-space: nowrap; }
@@ -1399,7 +1505,6 @@ onMounted(loadPage)
   font-size: .8rem;
 }
 .order-search { display: grid; grid-template-columns: minmax(220px, 1fr) 110px; gap: .75rem; }
-.section-pagination { display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: .75rem; color: var(--color-text-muted); font-size: .78rem; }
 @media (max-width: 991.98px) {
   .work-queue { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .quality-header { flex-direction: column; }
